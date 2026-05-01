@@ -1,0 +1,26 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'Segoe UI', sans-serif;
+}
+
+.table-state,
+.empty-row {
+  padding: 28px;
+  text-align: center;
+  color: #777;
+}
+
+.table-state--error {
+  color: #c0392b;
+}
+
+.product-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}

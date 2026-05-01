@@ -1,0 +1,376 @@
+/* ── Page ── */
+.customers-page {
+  max-width: 1400px;
+}
+
+.customers-header {
+  margin-bottom: 20px;
+}
+
+.customers-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin: 0 0 2px;
+}
+
+.customers-breadcrumb {
+  font-size: 12px;
+  color: #aaa;
+  margin: 0;
+}
+
+.customers-breadcrumb span {
+  margin: 0 4px;
+  color: #2563eb;
+}
+
+.customers-breadcrumb strong {
+  color: #2563eb;
+}
+
+/* ── Toolbar ── */
+.customers-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  gap: 12px;
+}
+
+.customers-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 8px 14px;
+  width: 300px;
+}
+
+.customers-search input {
+  border: none;
+  outline: none;
+  font-size: 13px;
+  color: #333;
+  width: 100%;
+  background: transparent;
+}
+
+.customers-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* Reuse btn-outline / btn-primary / btn-danger from Products.css
+   or redefine here if Customer.css is standalone: */
+.btn-outline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  color: #444;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-outline:hover {
+  background: #f5f5f5;
+}
+
+.btn-primary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  border: none;
+  border-radius: 8px;
+  background: #1565c0;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-primary:hover {
+  background: #0d47a1;
+}
+
+/* ── Table ── */
+.customers-table-wrap {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+  padding: 16px 16px 14px;
+}
+
+.customers-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.customers-table thead tr {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.customers-table th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: #bbb;
+  padding: 12px 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+
+.customers-table th svg {
+  vertical-align: middle;
+  opacity: 0.5;
+}
+
+.customers-table td {
+  padding: 12px 14px;
+  color: #333;
+  border-bottom: 1px solid #f7f7f7;
+  vertical-align: middle;
+}
+
+.customers-table tr:last-child td {
+  border-bottom: none;
+}
+
+.customers-table tr.row-selected td {
+  background: #eff6ff;
+}
+
+.customers-table input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: #1565c0;
+}
+
+/* ── Customer Cell ── */
+.customer-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.customer-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #dbeafe;
+  color: #1565c0;
+  font-size: 14px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.customer-id {
+  font-size: 10px;
+  color: #2563eb;
+  margin: 0 0 1px;
+  font-weight: 500;
+}
+
+.customer-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin: 0;
+}
+
+/* ── Contact Cell ── */
+.contact-email {
+  font-size: 12px;
+  color: #555;
+  margin: 0 0 2px;
+}
+
+.contact-phone {
+  font-size: 11px;
+  color: #aaa;
+  margin: 0;
+}
+
+/* ── Address ── */
+.address-cell {
+  font-size: 12px;
+  color: #666;
+  max-width: 200px;
+}
+
+/* ── Status ── */
+.status-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.status-verified {
+  background: #e8f5e9;
+  color: #2e7d32;
+}
+
+.status-unverified {
+  background: #fff3e0;
+  color: #e65100;
+}
+
+/* ── Action Buttons ── */
+.action-btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.action-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.action-btn:hover {
+  background: #f0f0f0;
+  color: #333;
+}
+
+.action-btn--delete:hover {
+  background: #fdecea;
+  color: #c62828;
+}
+
+/* ── Pagination ── */
+.customers-pagination {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 0 0;
+  font-size: 13px;
+  color: #888;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination-label {
+  font-size: 12px;
+  color: #aaa;
+}
+
+.pagination-controls select {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+  color: #333;
+  outline: none;
+  cursor: pointer;
+}
+
+.page-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: #fff;
+  color: #444;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.page-btn:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ── Delete Modal ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.modal {
+  background: #fff;
+  border-radius: 14px;
+  padding: 28px 32px;
+  width: 360px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+}
+
+.modal h3 {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin: 0 0 10px;
+}
+
+.modal p {
+  font-size: 13px;
+  color: #666;
+  margin: 0 0 24px;
+  line-height: 1.6;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.btn-danger {
+  padding: 8px 20px;
+  border: none;
+  border-radius: 8px;
+  background: #c62828;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-danger:hover {
+  background: #b71c1c;
+}

@@ -1,0 +1,121 @@
+.customers-manage-page {
+  max-width: 1400px;
+}
+
+.customers-manage-card {
+  width: min(960px, 100%);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  overflow: hidden;
+  padding: 20px 22px 16px;
+}
+
+.customers-manage-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.customers-manage-search {
+  width: 440px;
+  height: 42px;
+  border: 1px solid #d8d8d8;
+  border-radius: 9px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+}
+
+.customers-manage-search input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  outline: none;
+  color: #333;
+  font-size: 13px;
+}
+
+.customers-manage-filter {
+  height: 40px;
+  border: 1px solid #d8d8d8;
+  border-radius: 9px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 14px;
+}
+
+.customers-manage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.customers-manage-table thead tr {
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.customers-manage-table th {
+  color: #777;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 12px 14px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.customers-manage-table th svg {
+  color: #999;
+  vertical-align: middle;
+}
+
+.customers-manage-table td {
+  border-bottom: 1px solid #f4f4f4;
+  color: #333;
+  padding: 12px 14px;
+  vertical-align: middle;
+}
+
+.customers-manage-table tr:last-child td {
+  border-bottom: none;
+}
+
+.customers-manage-table tr.row-selected td {
+  background: #eff6ff;
+}
+
+.customers-manage-table input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  accent-color: #2563eb;
+}
+
+.verify-action {
+  color: #2563eb;
+}
+
+@media (max-width: 900px) {
+  .customers-manage-card {
+    overflow-x: auto;
+  }
+
+  .customers-manage-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .customers-manage-search {
+    width: 100%;
+  }
+}
