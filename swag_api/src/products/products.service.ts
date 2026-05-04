@@ -105,17 +105,14 @@ export class ProductsService {
   }
 
   async lookups() {
-    const [categories, sizes, garmentTypes, genders, palettes] = await Promise.all([
-      this.databaseService.query(`
-        SELECT
-          category_id AS id,
-          name,
-          slug,
-          display_order AS displayOrder
-        FROM CATEGORIES
-        ORDER BY display_order ASC, name ASC
-      `),
-      this.databaseService.query(`
+    const [hasGarmentTypes, hasPalettes, hasSizeRanges] = await Promise.all([
+      this.databaseService.tableExists('SIZE_GARMENT_TYPES'),
+      this.databaseService.tableExists('SKIN_TONE_PALETTES'),
+      this.databaseService.columnExists('SIZE_STANDARDS', 'chest_cm_min'),
+    ]);
+
+    const sizeQuery = hasSizeRanges
+      ? `
         SELECT
           size_id AS id,
           label,
@@ -133,29 +130,71 @@ export class ProductsService {
           sort_order AS sortOrder
         FROM SIZE_STANDARDS
         ORDER BY sort_order ASC
-      `),
+      `
+      : `
+        SELECT
+          size_id AS id,
+          label,
+          NULL AS labelLocal,
+          CAST(chest_cm AS float) AS chestCmMin,
+          CAST(chest_cm AS float) AS chestCmMax,
+          CAST(waist_cm AS float) AS waistCmMin,
+          CAST(waist_cm AS float) AS waistCmMax,
+          CAST(hip_cm AS float) AS hipCmMin,
+          CAST(hip_cm AS float) AS hipCmMax,
+          NULL AS heightCmMin,
+          NULL AS heightCmMax,
+          NULL AS weightKgMin,
+          NULL AS weightKgMax,
+          sort_order AS sortOrder
+        FROM SIZE_STANDARDS
+        ORDER BY sort_order ASC
+      `;
+
+    const [categories, sizes, dbGarmentTypes, genders, palettes] = await Promise.all([
       this.databaseService.query(`
+        SELECT
+          category_id AS id,
+          name,
+          slug,
+          display_order AS displayOrder
+        FROM CATEGORIES
+        ORDER BY display_order ASC, name ASC
+      `),
+      this.databaseService.query(sizeQuery),
+      hasGarmentTypes ? this.databaseService.query(`
         SELECT garment_type_id AS id, label
         FROM SIZE_GARMENT_TYPES
         ORDER BY garment_type_id ASC
-      `),
+      `) : Promise.resolve([]),
       this.databaseService.query(`
         SELECT gender_id AS id, label
         FROM GENDERS
         ORDER BY gender_id ASC
       `),
-      this.databaseService.query(`
+      hasPalettes ? this.databaseService.query(`
         SELECT palette_id AS id, label, depth, undertone
         FROM SKIN_TONE_PALETTES
         ORDER BY palette_id ASC
-      `),
+      `) : Promise.resolve([]),
     ]);
+
+    const garmentTypes = hasGarmentTypes
+      ? dbGarmentTypes
+      : categories.map((category: { id: number | string; name: string }) => ({
+          id: category.id,
+          label: category.name,
+        }));
 
     return { categories, sizes, garmentTypes, genders, palettes };
   }
 
   async measurementDefaults(sizeId: number, garmentTypeId: number) {
-    if (!sizeId || !garmentTypeId) {
+    if (
+      !sizeId ||
+      !garmentTypeId ||
+      !(await this.databaseService.tableExists('SIZE_GARMENT_MEASUREMENTS'))
+    ) {
       return [];
     }
 
@@ -241,17 +280,26 @@ export class ProductsService {
           g.gender_id AS genderId,
           g.label AS gender,
           stock.size_id AS sizeId,
+          stock.label AS size,
           stock.stock_qty AS sizeQty,
-          img.image_url AS imageUrl
+          img.image_url AS imageUrl,
+          sizes.sizes AS sizes
         FROM PRODUCTS p
         INNER JOIN CATEGORIES c ON c.category_id = p.category_id
         LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
         OUTER APPLY (
-          SELECT TOP 1 size_id, stock_qty
+          SELECT TOP 1 pss.size_id, ss.label, pss.stock_qty
           FROM PRODUCT_SIZE_STOCK pss
+          INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pss.size_id
           WHERE pss.product_id = p.product_id
           ORDER BY stock_qty DESC
         ) stock
+        OUTER APPLY (
+          SELECT STRING_AGG(ss.label, ', ') WITHIN GROUP (ORDER BY ss.sort_order) AS sizes
+          FROM PRODUCT_SIZE_STOCK pss
+          INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pss.size_id
+          WHERE pss.product_id = p.product_id AND pss.stock_qty > 0
+        ) sizes
         OUTER APPLY (
           SELECT TOP 1 image_url
           FROM PRODUCT_IMAGES pi
@@ -268,22 +316,27 @@ export class ProductsService {
       return null;
     }
 
-    const measurements = await this.databaseService.request((request) =>
-      request.input('productId', sql.UniqueIdentifier, id).query(`
-        SELECT
-          pm.size_id AS sizeId,
-          ss.label AS sizeLabel,
-          pm.garment_type_id AS garmentTypeId,
-          sgt.label AS garmentType,
-          pm.measurement_name AS measurementName,
-          CAST(pm.value_cm AS float) AS valueCm
-        FROM PRODUCT_MEASUREMENTS pm
-        INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pm.size_id
-        INNER JOIN SIZE_GARMENT_TYPES sgt ON sgt.garment_type_id = pm.garment_type_id
-        WHERE pm.product_id = @productId
-        ORDER BY ss.sort_order, sgt.garment_type_id, pm.measurement_name
-      `),
-    );
+    const hasMeasurements = await this.databaseService.tableExists('PRODUCT_MEASUREMENTS');
+    const hasGarmentTypes = await this.databaseService.tableExists('SIZE_GARMENT_TYPES');
+    const measurements =
+      hasMeasurements && hasGarmentTypes
+        ? await this.databaseService.request((request) =>
+            request.input('productId', sql.UniqueIdentifier, id).query(`
+              SELECT
+                pm.size_id AS sizeId,
+                ss.label AS sizeLabel,
+                pm.garment_type_id AS garmentTypeId,
+                sgt.label AS garmentType,
+                pm.measurement_name AS measurementName,
+                CAST(pm.value_cm AS float) AS valueCm
+              FROM PRODUCT_MEASUREMENTS pm
+              INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pm.size_id
+              INNER JOIN SIZE_GARMENT_TYPES sgt ON sgt.garment_type_id = pm.garment_type_id
+              WHERE pm.product_id = @productId
+              ORDER BY ss.sort_order, sgt.garment_type_id, pm.measurement_name
+            `),
+          )
+        : [];
 
     const images = await this.databaseService.request((request) =>
       request.input('productId', sql.UniqueIdentifier, id).query(`
@@ -298,10 +351,24 @@ export class ProductsService {
       `),
     );
 
+    const sizeStock = await this.databaseService.request((request) =>
+      request.input('productId', sql.UniqueIdentifier, id).query(`
+        SELECT
+          pss.size_id AS sizeId,
+          ss.label AS label,
+          pss.stock_qty AS stockQty
+        FROM PRODUCT_SIZE_STOCK pss
+        INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pss.size_id
+        WHERE pss.product_id = @productId
+        ORDER BY ss.sort_order ASC
+      `),
+    );
+
     return {
       ...product,
       garmentTypeId: measurements[0]?.garmentTypeId ?? null,
       images,
+      sizeStock,
       measurements,
     };
   }
@@ -401,6 +468,15 @@ export class ProductsService {
     productDto: CreateProductDto | UpdateProductDto,
   ) {
     if (!productDto.sizeId || !productDto.garmentTypeId || !productDto.measurements?.length) {
+      return;
+    }
+
+    const [hasMeasurements, hasGarmentTypes] = await Promise.all([
+      this.databaseService.tableExists('PRODUCT_MEASUREMENTS'),
+      this.databaseService.tableExists('SIZE_GARMENT_TYPES'),
+    ]);
+
+    if (!hasMeasurements || !hasGarmentTypes) {
       return;
     }
 

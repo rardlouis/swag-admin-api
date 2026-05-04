@@ -408,7 +408,11 @@ export class AdminService {
         .input('body', trimmedText)
         .query(`
           INSERT INTO MESSAGES (convo_id, sender_id, body, is_read)
-          VALUES (@conversationId, @senderId, @body, 1)
+          VALUES (@conversationId, @senderId, @body, 0)
+
+          UPDATE CONVERSATIONS
+          SET last_message_at = GETDATE()
+          WHERE convo_id = @conversationId
         `),
     );
 

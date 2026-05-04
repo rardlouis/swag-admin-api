@@ -94,8 +94,10 @@ export function ChatProvider({ children }) {
 
   const activeConv = conversations.find((c) => c.id === activeId);
 
-  const loadConversations = useCallback(async () => {
-    setLoading(true);
+  const loadConversations = useCallback(async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+    }
     setError("");
 
     try {
@@ -108,12 +110,22 @@ export function ChatProvider({ children }) {
     } catch (err) {
       setError(err.message || "Unable to load chats");
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     loadConversations();
+  }, [loadConversations]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadConversations(true);
+    }, 4000);
+
+    return () => clearInterval(timer);
   }, [loadConversations]);
 
   const selectConversation = (convId) => {

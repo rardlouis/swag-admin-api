@@ -5,9 +5,13 @@ import { ProductsModule } from './products/products.module';
 import { DatabaseModule } from './database/database.module';
 import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth/auth.module';
+import { CartModule } from './cart/cart.module';
+import { SavedModule } from './saved/saved.module';
+import { ProfileModule } from './profile/profile.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
-  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule],
+  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule, CartModule, SavedModule, ProfileModule, ChatModule],
   controllers: [AppController],
   providers: [AppService],
 })
