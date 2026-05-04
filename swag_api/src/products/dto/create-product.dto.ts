@@ -12,6 +12,7 @@ export class CreateProductDto {
   price?: number;
   quantity?: number;
   brand?: string | null;
+  colorId?: number | null;
   colorName?: string | null;
   colorHex?: string | null;
   imageUrl?: string | null;

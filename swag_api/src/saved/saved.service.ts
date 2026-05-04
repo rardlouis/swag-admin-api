@@ -53,6 +53,7 @@ export class SavedService {
     }
 
     await this.ensureTable();
+    const color = await this.productColorSelect();
 
     return this.databaseService.request((request) =>
       request.input('userId', sql.UniqueIdentifier, userId).query(`
@@ -65,8 +66,7 @@ export class SavedService {
           CAST(p.price AS float) AS price,
           p.stock_qty AS qty,
           p.brand,
-          p.color_name AS color,
-          p.color_hex AS colorHex,
+          ${color.select},
           p.avg_rating AS avgRating,
           p.is_active AS isActive,
           c.name AS category,
@@ -80,6 +80,7 @@ export class SavedService {
         INNER JOIN PRODUCTS p ON p.product_id = sp.product_id
         INNER JOIN CATEGORIES c ON c.category_id = p.category_id
         LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
+        ${color.join}
         OUTER APPLY (
           SELECT TOP 1 image_url
           FROM PRODUCT_IMAGES pi
@@ -163,5 +164,35 @@ export class SavedService {
     );
 
     return Number(rows[0]?.count ?? 0);
+  }
+
+  private async productColorSelect() {
+    const hasColorId = await this.databaseService.columnExists('PRODUCTS', 'color_id');
+
+    if (hasColorId) {
+      return {
+        join: `
+        LEFT JOIN PRESET_COLORS pc ON pc.color_id = p.color_id
+        LEFT JOIN COLOR_FAMILIES cf ON cf.family_id = pc.family_id`,
+        select: `
+          p.color_id AS colorId,
+          pc.color_name AS colorName,
+          pc.color_hex AS colorHex,
+          cf.family_id AS colorFamilyId,
+          cf.label AS colorFamily,
+          cf.label AS color`,
+      };
+    }
+
+    return {
+      join: '',
+      select: `
+          NULL AS colorId,
+          p.color_name AS colorName,
+          p.color_hex AS colorHex,
+          NULL AS colorFamilyId,
+          NULL AS colorFamily,
+          p.color_name AS color`,
+    };
   }
 }

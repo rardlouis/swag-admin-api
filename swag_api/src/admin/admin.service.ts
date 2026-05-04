@@ -116,6 +116,12 @@ export class AdminService {
   }
 
   async orders() {
+    const hasColorId = await this.databaseService.columnExists('PRODUCTS', 'color_id');
+    const productColorJoin = hasColorId
+      ? 'LEFT JOIN PRESET_COLORS pc ON pc.color_id = p.color_id LEFT JOIN COLOR_FAMILIES cf ON cf.family_id = pc.family_id'
+      : '';
+    const productColorSelect = hasColorId ? 'cf.label AS color' : 'p.color_name AS color';
+
     return this.databaseService.query(`
       SELECT
         CONVERT(varchar(36), o.order_id) AS id,
@@ -133,10 +139,11 @@ export class AdminService {
       OUTER APPLY (
         SELECT TOP 1
           p.name,
-          p.color_name AS color,
+          ${productColorSelect},
           pi.image_url AS imageUrl
         FROM ORDER_ITEMS oi
         INNER JOIN PRODUCTS p ON p.product_id = oi.product_id
+        ${productColorJoin}
         OUTER APPLY (
           SELECT TOP 1 image_url
           FROM PRODUCT_IMAGES

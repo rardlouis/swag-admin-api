@@ -8,6 +8,12 @@ type UploadedProductFile = {
   filename: string;
 };
 
+type ProductColorSchema = {
+  hasColorId: boolean;
+  hasLegacyColorName: boolean;
+  hasLegacyColorHex: boolean;
+};
+
 @Injectable()
 export class ProductsService {
   constructor(private readonly databaseService: DatabaseService) {}
@@ -23,7 +29,20 @@ export class ProductsService {
     this.validateProduct(createProductDto);
 
     const quantity = Number(createProductDto.quantity ?? 0);
-    const inserted = await this.databaseService.request((request) =>
+    const colorSchema = await this.productColorSchema();
+    const colorInputs = await this.resolveColorInputs(createProductDto, colorSchema);
+    const colorColumns = [
+      colorSchema.hasColorId ? 'color_id' : null,
+      colorSchema.hasLegacyColorHex ? 'color_hex' : null,
+      colorSchema.hasLegacyColorName ? 'color_name' : null,
+    ].filter(Boolean);
+    const colorValues = [
+      colorSchema.hasColorId ? '@colorId' : null,
+      colorSchema.hasLegacyColorHex ? '@colorHex' : null,
+      colorSchema.hasLegacyColorName ? '@colorName' : null,
+    ].filter(Boolean);
+
+    const inserted = await this.databaseService.request((request) => {
       request
         .input('categoryId', sql.SmallInt, createProductDto.categoryId)
         .input('genderId', sql.TinyInt, createProductDto.genderId ?? null)
@@ -31,22 +50,24 @@ export class ProductsService {
         .input('description', sql.NVarChar(sql.MAX), createProductDto.description ?? null)
         .input('price', sql.Decimal(10, 2), Number(createProductDto.price))
         .input('stockQty', sql.Int, quantity)
-        .input('brand', sql.NVarChar(100), createProductDto.brand ?? null)
-        .input('colorHex', sql.NVarChar(7), createProductDto.colorHex ?? null)
-        .input('colorName', sql.NVarChar(100), createProductDto.colorName ?? null)
-        .input('isActive', sql.Bit, createProductDto.isActive ?? quantity > 0)
-        .query(`
+        .input('brand', sql.NVarChar(100), createProductDto.brand ?? null);
+
+      if (colorSchema.hasColorId) request.input('colorId', sql.SmallInt, colorInputs.colorId);
+      if (colorSchema.hasLegacyColorHex) request.input('colorHex', sql.NVarChar(7), colorInputs.colorHex);
+      if (colorSchema.hasLegacyColorName) request.input('colorName', sql.NVarChar(100), colorInputs.colorName);
+
+      return request.input('isActive', sql.Bit, createProductDto.isActive ?? quantity > 0).query(`
           INSERT INTO PRODUCTS (
             category_id, gender_id, name, description, price, stock_qty,
-            brand, color_hex, color_name, is_active
+            brand${colorColumns.length ? `, ${colorColumns.join(', ')}` : ''}, is_active
           )
           OUTPUT CONVERT(varchar(36), inserted.product_id) AS id
           VALUES (
             @categoryId, @genderId, @name, @description, @price, @stockQty,
-            @brand, @colorHex, @colorName, @isActive
+            @brand${colorValues.length ? `, ${colorValues.join(', ')}` : ''}, @isActive
           )
-        `),
-    );
+        `);
+    });
 
     const id = (inserted[0] as { id: string }).id;
 
@@ -105,10 +126,14 @@ export class ProductsService {
   }
 
   async lookups() {
-    const [hasGarmentTypes, hasPalettes, hasSizeRanges] = await Promise.all([
+    await this.ensureColorLookups();
+
+    const [hasGarmentTypes, hasPalettes, hasSizeRanges, hasPresetColors, hasColorFamilies] = await Promise.all([
       this.databaseService.tableExists('SIZE_GARMENT_TYPES'),
       this.databaseService.tableExists('SKIN_TONE_PALETTES'),
       this.databaseService.columnExists('SIZE_STANDARDS', 'chest_cm_min'),
+      this.databaseService.tableExists('PRESET_COLORS'),
+      this.databaseService.tableExists('COLOR_FAMILIES'),
     ]);
 
     const sizeQuery = hasSizeRanges
@@ -151,7 +176,7 @@ export class ProductsService {
         ORDER BY sort_order ASC
       `;
 
-    const [categories, sizes, dbGarmentTypes, genders, palettes] = await Promise.all([
+    const [categories, sizes, dbGarmentTypes, genders, palettes, colors, colorFamilies] = await Promise.all([
       this.databaseService.query(`
         SELECT
           category_id AS id,
@@ -177,6 +202,22 @@ export class ProductsService {
         FROM SKIN_TONE_PALETTES
         ORDER BY palette_id ASC
       `) : Promise.resolve([]),
+      hasPresetColors ? this.databaseService.query(`
+        SELECT
+          pc.color_id AS id,
+          pc.color_name AS name,
+          pc.color_hex AS hex,
+          cf.family_id AS familyId,
+          cf.label AS family
+        FROM PRESET_COLORS pc
+        INNER JOIN COLOR_FAMILIES cf ON cf.family_id = pc.family_id
+        ORDER BY cf.label ASC, pc.color_name ASC
+      `) : Promise.resolve([]),
+      hasColorFamilies ? this.databaseService.query(`
+        SELECT family_id AS id, label
+        FROM COLOR_FAMILIES
+        ORDER BY label ASC
+      `) : Promise.resolve([]),
     ]);
 
     const garmentTypes = hasGarmentTypes
@@ -186,7 +227,7 @@ export class ProductsService {
           label: category.name,
         }));
 
-    return { categories, sizes, garmentTypes, genders, palettes };
+    return { categories, sizes, garmentTypes, genders, palettes, colors, colorFamilies };
   }
 
   async measurementDefaults(sizeId: number, garmentTypeId: number) {
@@ -214,6 +255,8 @@ export class ProductsService {
   }
 
   async findAll() {
+    const color = await this.productColorSelect();
+
     return this.databaseService.query(`
       SELECT
         CONVERT(varchar(36), p.product_id) AS id,
@@ -222,8 +265,7 @@ export class ProductsService {
         CAST(p.price AS float) AS price,
         p.stock_qty AS qty,
         p.brand,
-        p.color_name AS color,
-        p.color_hex AS colorHex,
+        ${color.select},
         p.avg_rating AS avgRating,
         p.is_active AS isActive,
         p.created_at AS createdAt,
@@ -238,6 +280,7 @@ export class ProductsService {
       FROM PRODUCTS p
       INNER JOIN CATEGORIES c ON c.category_id = p.category_id
       LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
+      ${color.join}
       OUTER APPLY (
         SELECT TOP 1 image_url
         FROM PRODUCT_IMAGES pi
@@ -260,6 +303,8 @@ export class ProductsService {
   }
 
   async findOne(id: string) {
+    const color = await this.productColorSelect();
+
     const rows = await this.databaseService.request((request) =>
       request.input('id', sql.UniqueIdentifier, id).query(`
         SELECT
@@ -269,8 +314,7 @@ export class ProductsService {
           CAST(p.price AS float) AS price,
           p.stock_qty AS qty,
           p.brand,
-          p.color_name AS color,
-          p.color_hex AS colorHex,
+          ${color.select},
           p.avg_rating AS avgRating,
           p.is_active AS isActive,
           p.created_at AS createdAt,
@@ -287,6 +331,7 @@ export class ProductsService {
         FROM PRODUCTS p
         INNER JOIN CATEGORIES c ON c.category_id = p.category_id
         LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
+        ${color.join}
         OUTER APPLY (
           SELECT TOP 1 pss.size_id, ss.label, pss.stock_qty
           FROM PRODUCT_SIZE_STOCK pss
@@ -376,8 +421,15 @@ export class ProductsService {
   async update(id: string, updateProductDto: UpdateProductDto) {
     this.validateProduct(updateProductDto);
     const quantity = Number(updateProductDto.quantity ?? 0);
+    const colorSchema = await this.productColorSchema();
+    const colorInputs = await this.resolveColorInputs(updateProductDto, colorSchema);
+    const colorAssignments = [
+      colorSchema.hasColorId ? 'color_id = @colorId' : null,
+      colorSchema.hasLegacyColorHex ? 'color_hex = @colorHex' : null,
+      colorSchema.hasLegacyColorName ? 'color_name = @colorName' : null,
+    ].filter(Boolean);
 
-    await this.databaseService.request((request) =>
+    await this.databaseService.request((request) => {
       request
         .input('id', sql.UniqueIdentifier, id)
         .input('categoryId', sql.SmallInt, updateProductDto.categoryId)
@@ -386,11 +438,13 @@ export class ProductsService {
         .input('description', sql.NVarChar(sql.MAX), updateProductDto.description ?? null)
         .input('price', sql.Decimal(10, 2), Number(updateProductDto.price))
         .input('stockQty', sql.Int, quantity)
-        .input('brand', sql.NVarChar(100), updateProductDto.brand ?? null)
-        .input('colorHex', sql.NVarChar(7), updateProductDto.colorHex ?? null)
-        .input('colorName', sql.NVarChar(100), updateProductDto.colorName ?? null)
-        .input('isActive', sql.Bit, updateProductDto.isActive ?? quantity > 0)
-        .query(`
+        .input('brand', sql.NVarChar(100), updateProductDto.brand ?? null);
+
+      if (colorSchema.hasColorId) request.input('colorId', sql.SmallInt, colorInputs.colorId);
+      if (colorSchema.hasLegacyColorHex) request.input('colorHex', sql.NVarChar(7), colorInputs.colorHex);
+      if (colorSchema.hasLegacyColorName) request.input('colorName', sql.NVarChar(100), colorInputs.colorName);
+
+      return request.input('isActive', sql.Bit, updateProductDto.isActive ?? quantity > 0).query(`
           UPDATE PRODUCTS
           SET
             category_id = @categoryId,
@@ -400,12 +454,11 @@ export class ProductsService {
             price = @price,
             stock_qty = @stockQty,
             brand = @brand,
-            color_hex = @colorHex,
-            color_name = @colorName,
+            ${colorAssignments.length ? `${colorAssignments.join(',\n            ')},` : ''}
             is_active = @isActive
           WHERE product_id = @id
-        `),
-    );
+        `);
+    });
 
     if (updateProductDto.sizeId) {
       await this.databaseService.request((request) =>
@@ -461,6 +514,149 @@ export class ProductsService {
     if (productDto.quantity === undefined || Number(productDto.quantity) < 0) {
       throw new BadRequestException('A valid quantity is required');
     }
+  }
+
+  private async productColorSchema(): Promise<ProductColorSchema> {
+    const [hasColorId, hasLegacyColorName, hasLegacyColorHex] = await Promise.all([
+      this.databaseService.columnExists('PRODUCTS', 'color_id'),
+      this.databaseService.columnExists('PRODUCTS', 'color_name'),
+      this.databaseService.columnExists('PRODUCTS', 'color_hex'),
+    ]);
+
+    return { hasColorId, hasLegacyColorName, hasLegacyColorHex };
+  }
+
+  private async productColorSelect() {
+    const schema = await this.productColorSchema();
+
+    if (schema.hasColorId) {
+      return {
+        join: `
+      LEFT JOIN PRESET_COLORS pc ON pc.color_id = p.color_id
+      LEFT JOIN COLOR_FAMILIES cf ON cf.family_id = pc.family_id`,
+        select: `
+        p.color_id AS colorId,
+        pc.color_name AS colorName,
+        pc.color_hex AS colorHex,
+        cf.family_id AS colorFamilyId,
+        cf.label AS colorFamily,
+        cf.label AS color`,
+      };
+    }
+
+    return {
+      join: '',
+      select: `
+        NULL AS colorId,
+        p.color_name AS colorName,
+        p.color_hex AS colorHex,
+        NULL AS colorFamilyId,
+        NULL AS colorFamily,
+        p.color_name AS color`,
+    };
+  }
+
+  private async resolveColorInputs(
+    productDto: CreateProductDto | UpdateProductDto,
+    schema: ProductColorSchema,
+  ) {
+    const colorId = productDto.colorId ? Number(productDto.colorId) : null;
+
+    if (schema.hasColorId && colorId) {
+      const rows = await this.databaseService.request<{
+        colorName: string;
+        colorHex: string;
+      }>((request) =>
+        request.input('colorId', sql.SmallInt, colorId).query(`
+          SELECT TOP 1 color_name AS colorName, color_hex AS colorHex
+          FROM PRESET_COLORS
+          WHERE color_id = @colorId
+        `),
+      );
+
+      if (!rows[0]) {
+        throw new BadRequestException('Selected color does not exist');
+      }
+
+      return {
+        colorId,
+        colorName: rows[0].colorName,
+        colorHex: rows[0].colorHex,
+      };
+    }
+
+    return {
+      colorId,
+      colorName: productDto.colorName ?? null,
+      colorHex: productDto.colorHex ?? null,
+    };
+  }
+
+  private async ensureColorLookups() {
+    const [hasColorFamilies, hasPresetColors, hasColorTones] = await Promise.all([
+      this.databaseService.tableExists('COLOR_FAMILIES'),
+      this.databaseService.tableExists('PRESET_COLORS'),
+      this.databaseService.tableExists('COLOR_TONES'),
+    ]);
+
+    if (!hasColorFamilies || !hasPresetColors || !hasColorTones) {
+      return;
+    }
+
+    await this.databaseService.query(`
+      IF NOT EXISTS (SELECT 1 FROM COLOR_FAMILIES)
+      BEGIN
+        INSERT INTO COLOR_FAMILIES (label)
+        VALUES
+          ('Red'), ('Orange'), ('Yellow'), ('Green'), ('Blue'),
+          ('Purple'), ('Pink'), ('Brown'), ('Black'), ('White'),
+          ('Gray'), ('Beige'), ('Gold'), ('Silver');
+      END
+    `);
+
+    await this.databaseService.query(`
+      IF NOT EXISTS (SELECT 1 FROM COLOR_TONES)
+      BEGIN
+        INSERT INTO COLOR_TONES (label)
+        VALUES ('Classic'), ('Light'), ('Dark');
+      END
+    `);
+
+    await this.databaseService.query(`
+      IF NOT EXISTS (SELECT 1 FROM PRESET_COLORS)
+      BEGIN
+        INSERT INTO PRESET_COLORS (color_name, color_hex, tone_id, family_id)
+        SELECT colorName, colorHex, ct.tone_id, cf.family_id
+        FROM (VALUES
+          ('Red', '#DC2626', 'Red', 'Classic'),
+          ('Burgundy', '#800020', 'Red', 'Dark'),
+          ('Maroon', '#7F1D1D', 'Red', 'Dark'),
+          ('Coral', '#F97366', 'Orange', 'Light'),
+          ('Orange', '#F97316', 'Orange', 'Classic'),
+          ('Mustard', '#D97706', 'Yellow', 'Dark'),
+          ('Yellow', '#FACC15', 'Yellow', 'Classic'),
+          ('Olive', '#6B8E23', 'Green', 'Dark'),
+          ('Emerald', '#059669', 'Green', 'Light'),
+          ('Navy', '#1E3A8A', 'Blue', 'Dark'),
+          ('Blue', '#2563EB', 'Blue', 'Classic'),
+          ('Lavender', '#A78BFA', 'Purple', 'Light'),
+          ('Purple', '#7C3AED', 'Purple', 'Classic'),
+          ('Pink', '#EC4899', 'Pink', 'Classic'),
+          ('Blush', '#F9A8D4', 'Pink', 'Light'),
+          ('Tan', '#D2B48C', 'Brown', 'Light'),
+          ('Brown', '#7C2D12', 'Brown', 'Classic'),
+          ('Black', '#111111', 'Black', 'Classic'),
+          ('White', '#FFFFFF', 'White', 'Classic'),
+          ('Gray', '#6B7280', 'Gray', 'Classic'),
+          ('Cream', '#F5F5DC', 'Beige', 'Light'),
+          ('Beige', '#D6C7A1', 'Beige', 'Classic'),
+          ('Gold', '#D4AF37', 'Gold', 'Classic'),
+          ('Silver', '#C0C0C0', 'Silver', 'Classic')
+        ) AS seed(colorName, colorHex, familyLabel, toneLabel)
+        INNER JOIN COLOR_FAMILIES cf ON cf.label = seed.familyLabel
+        INNER JOIN COLOR_TONES ct ON ct.label = seed.toneLabel;
+      END
+    `);
   }
 
   private async saveProductMeasurements(
