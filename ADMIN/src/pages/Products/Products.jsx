@@ -195,7 +195,8 @@ export default function Products() {
                 <td>
                   <div className="color-cell">
                     <span className="color-dot" style={{ background: product.colorHex || COLOR_MAP[product.color?.toLowerCase()] || "#ccc" }} />
-                    {product.color || "-"}
+                    {product.colorName || product.color || "-"}
+                    {product.colorName && product.color ? <small>{product.color}</small> : null}
                   </div>
                 </td>
                 <td>{formatPeso(product.price)}</td>

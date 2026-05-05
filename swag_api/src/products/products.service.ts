@@ -14,6 +14,8 @@ type ProductColorSchema = {
   hasLegacyColorHex: boolean;
 };
 
+const ALLOWED_CATEGORY_SLUGS = "'tops', 'bottoms', 'dresses'";
+
 @Injectable()
 export class ProductsService {
   constructor(private readonly databaseService: DatabaseService) {}
@@ -184,6 +186,7 @@ export class ProductsService {
           slug,
           display_order AS displayOrder
         FROM CATEGORIES
+        WHERE slug IN (${ALLOWED_CATEGORY_SLUGS})
         ORDER BY display_order ASC, name ASC
       `),
       this.databaseService.query(sizeQuery),
@@ -298,6 +301,7 @@ export class ProductsService {
         INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pss.size_id
         WHERE pss.product_id = p.product_id AND pss.stock_qty > 0
       ) sizes
+      WHERE c.slug IN (${ALLOWED_CATEGORY_SLUGS})
       ORDER BY p.created_at DESC
     `);
   }
@@ -408,12 +412,14 @@ export class ProductsService {
         ORDER BY ss.sort_order ASC
       `),
     );
+    const sizeReference = await this.sizeReference(product.sizeId);
 
     return {
       ...product,
       garmentTypeId: measurements[0]?.garmentTypeId ?? null,
       images,
       sizeStock,
+      sizeReference,
       measurements,
     };
   }
@@ -590,6 +596,55 @@ export class ProductsService {
       colorName: productDto.colorName ?? null,
       colorHex: productDto.colorHex ?? null,
     };
+  }
+
+  private async sizeReference(sizeId?: number | string | null) {
+    if (!sizeId) {
+      return null;
+    }
+
+    const hasSizeRanges = await this.databaseService.columnExists('SIZE_STANDARDS', 'chest_cm_min');
+    const query = hasSizeRanges
+      ? `
+        SELECT TOP 1
+          size_id AS sizeId,
+          label,
+          CAST(chest_cm_min AS float) AS chestCmMin,
+          CAST(chest_cm_max AS float) AS chestCmMax,
+          CAST(waist_cm_min AS float) AS waistCmMin,
+          CAST(waist_cm_max AS float) AS waistCmMax,
+          CAST(hip_cm_min AS float) AS hipCmMin,
+          CAST(hip_cm_max AS float) AS hipCmMax,
+          CAST(height_cm_min AS float) AS heightCmMin,
+          CAST(height_cm_max AS float) AS heightCmMax,
+          CAST(weight_kg_min AS float) AS weightKgMin,
+          CAST(weight_kg_max AS float) AS weightKgMax
+        FROM SIZE_STANDARDS
+        WHERE size_id = @sizeId
+      `
+      : `
+        SELECT TOP 1
+          size_id AS sizeId,
+          label,
+          CAST(chest_cm AS float) AS chestCmMin,
+          CAST(chest_cm AS float) AS chestCmMax,
+          CAST(waist_cm AS float) AS waistCmMin,
+          CAST(waist_cm AS float) AS waistCmMax,
+          CAST(hip_cm AS float) AS hipCmMin,
+          CAST(hip_cm AS float) AS hipCmMax,
+          NULL AS heightCmMin,
+          NULL AS heightCmMax,
+          NULL AS weightKgMin,
+          NULL AS weightKgMax
+        FROM SIZE_STANDARDS
+        WHERE size_id = @sizeId
+      `;
+
+    const rows = await this.databaseService.request((request) =>
+      request.input('sizeId', sql.SmallInt, Number(sizeId)).query(query),
+    );
+
+    return rows[0] ?? null;
   }
 
   private async ensureColorLookups() {

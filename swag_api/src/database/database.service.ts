@@ -131,10 +131,17 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
         VALUES
           ('Tops', 'tops', 1),
           ('Bottoms', 'bottoms', 2),
-          ('Dresses', 'dresses', 3),
-          ('Outerwear', 'outerwear', 4),
-          ('Accessories', 'accessories', 5);
+          ('Dresses', 'dresses', 3);
       END
+
+      DELETE c
+      FROM CATEGORIES c
+      WHERE c.slug IN ('outerwear', 'accessories')
+        AND NOT EXISTS (
+          SELECT 1
+          FROM PRODUCTS p
+          WHERE p.category_id = c.category_id
+        );
     `);
   }
 
@@ -147,6 +154,13 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
       await this.query(`
         ALTER TABLE USERS
         ADD preferred_size_id SMALLINT NULL
+      `);
+    }
+
+    if (!(await this.columnExists('USERS', 'skin_hex'))) {
+      await this.query(`
+        ALTER TABLE USERS
+        ADD skin_hex NVARCHAR(7) NULL
       `);
     }
   }

@@ -2,6 +2,8 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
 import { DatabaseService } from '../database/database.service';
 
+const ALLOWED_CATEGORY_SLUGS = "'tops', 'bottoms', 'dresses'";
+
 @Injectable()
 export class SavedService {
   constructor(private readonly databaseService: DatabaseService) {}
@@ -94,6 +96,7 @@ export class SavedService {
           WHERE pss.product_id = p.product_id AND pss.stock_qty > 0
         ) sizes
         WHERE sp.user_id = @userId
+          AND c.slug IN (${ALLOWED_CATEGORY_SLUGS})
         ORDER BY sp.saved_at DESC
       `),
     );

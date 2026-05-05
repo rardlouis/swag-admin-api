@@ -19,6 +19,7 @@ const initialForm = {
   sizeId: "",
   garmentTypeId: "",
   measurements: [],
+  colorId: "",
   colorName: "",
   colorHex: "",
   price: "",
@@ -30,7 +31,13 @@ const initialForm = {
 export default function ProductsAdd() {
   const navigate = useNavigate();
   const [form, setForm] = useState(initialForm);
-  const [lookups, setLookups] = useState({ categories: [], sizes: [], garmentTypes: [], genders: [] });
+  const [lookups, setLookups] = useState({
+    categories: [],
+    sizes: [],
+    garmentTypes: [],
+    genders: [],
+    colors: [],
+  });
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
@@ -56,6 +63,7 @@ export default function ProductsAdd() {
   }, [form.sizeId, form.garmentTypeId]);
 
   const selectedSize = lookups.sizes.find((size) => String(size.id) === String(form.sizeId));
+  const selectedColor = lookups.colors.find((color) => String(color.id) === String(form.colorId));
 
   const updateMeasurement = (measurementName, valueCm) => {
     setForm((prev) => ({
@@ -108,8 +116,9 @@ export default function ProductsAdd() {
     sizeId: form.sizeId ? Number(form.sizeId) : null,
     garmentTypeId: form.garmentTypeId ? Number(form.garmentTypeId) : null,
     measurements: form.measurements,
-    colorName: form.colorName || null,
-    colorHex: form.colorHex || null,
+    colorId: form.colorId ? Number(form.colorId) : null,
+    colorName: selectedColor?.name ?? form.colorName ?? null,
+    colorHex: selectedColor?.hex ?? form.colorHex ?? null,
     price: Number(form.price),
     quantity: Number(form.quantity),
     imageUrls: form.images.map((image) => image.imageUrl),
@@ -267,24 +276,35 @@ export default function ProductsAdd() {
           )}
 
           <div className="product-add-row">
-            <label className="product-add-field">
-              <span>Color Name</span>
-              <input
-                value={form.colorName}
-                onChange={(e) => updateField("colorName", e.target.value)}
-                placeholder="Black"
-              />
+            <label className="product-add-field product-add-select">
+              <span>Exact Product Color</span>
+              <select
+                value={form.colorId}
+                onChange={(e) => updateField("colorId", e.target.value)}
+              >
+                <option value="">Select preset color</option>
+                {lookups.colors.map((color) => (
+                  <option key={color.id} value={color.id}>
+                    {color.name} ({color.family})
+                  </option>
+                ))}
+              </select>
+              <MdKeyboardArrowDown size={20} />
             </label>
 
-            <label className="product-add-field">
-              <span>Color Hex</span>
-              <input
-                value={form.colorHex}
-                onChange={(e) => updateField("colorHex", e.target.value)}
-                placeholder="#111111"
-                maxLength={7}
-              />
-            </label>
+            <div className="color-family-summary">
+              <span>User-facing color</span>
+              <p>
+                {selectedColor ? (
+                  <>
+                    <i style={{ background: selectedColor.hex }} />
+                    {selectedColor.family}
+                  </>
+                ) : (
+                  "Select a color to show its catalog family."
+                )}
+              </p>
+            </div>
           </div>
 
           <div className="product-add-row">
