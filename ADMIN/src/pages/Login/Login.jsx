@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { PiPersonSimpleBold } from "react-icons/pi";
 import { AiOutlineEye, AiOutlineEyeInvisible } from "react-icons/ai";
 import { apiPost } from "../../api.js";
 import "./Login.css";
@@ -39,7 +38,9 @@ export default function Login() {
         {/* Left Side */}
         <div className="login-left">
           <div className="login-logo">
-            <div className="logo-placeholder">A</div>
+            <div className="logo-placeholder">
+              <img src="/afro-logo.png" alt="A'FRO logo" />
+            </div>
             <span>A'FRO</span>
           </div>
 
@@ -89,9 +90,7 @@ export default function Login() {
 
         {/* Right Side */}
         <div className="login-right">
-          <div className="mascot-placeholder">
-            <PiPersonSimpleBold size={140} color="white" />
-          </div>
+          <img className="login-mascot" src="/afro-logo.png" alt="A'FRO Dry Goods logo" />
           <h1>A'FRO<br />Dry Goods</h1>
           <p>THRIFT · STYLE · COMMUNITY</p>
         </div>

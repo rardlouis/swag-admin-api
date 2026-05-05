@@ -75,7 +75,9 @@ export default function Sidebar() {
     <div className="sidebar">
       {/* Logo */}
       <div className="sidebar-logo">
-        <div className="sidebar-logo-icon">A</div>
+        <div className="sidebar-logo-icon">
+          <img src="/afro-logo.png" alt="A'FRO logo" />
+        </div>
         <span>A'FRO DRY GOODS</span>
       </div>
 

@@ -27,12 +27,17 @@
   height: 32px;
   border-radius: 50%;
   background: #1a3a6b;
-  color: white;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-weight: bold;
-  font-size: 14px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.sidebar-logo-icon img {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
 }
 
 .sidebar-section-label {
