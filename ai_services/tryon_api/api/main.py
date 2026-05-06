@@ -39,7 +39,8 @@ PRESET_DIR = "./presets"
 async def tryon_upload(
     person_image: UploadFile = File(...),
     garment_image: UploadFile = File(...),
-    category: str = Form(default="auto")
+    category: str = Form(default="auto"),
+    garment_photo_type: str = Form(default="flat-lay")
 ):
     try:
         person_bytes  = await person_image.read()
@@ -60,7 +61,12 @@ async def tryon_upload(
         print(f"👤 Person size: {person.size}")
         print(f"👕 Garment size: {garment.size}")
 
-        output = vton.run(person, garment, category=category)
+        output = vton.run(
+            person,
+            garment,
+            category=category,
+            garment_photo_type=garment_photo_type,
+        )
 
         if output is None:
             raise HTTPException(status_code=500, detail="Pipeline returned None!")
@@ -89,7 +95,8 @@ async def tryon_upload(
 async def tryon_preset(
     person_image: UploadFile = File(...),
     garment_id: str = Form(...),
-    category: str = Form(default="auto")
+    category: str = Form(default="auto"),
+    garment_photo_type: str = Form(default="flat-lay")
 ):
     garment_path = os.path.join(PRESET_DIR, f"{garment_id}.jpg")
     if not os.path.exists(garment_path):
@@ -102,7 +109,12 @@ async def tryon_preset(
         person = Image.open(io.BytesIO(await person_image.read()))
         garment = Image.open(garment_path)
 
-        output = vton.run(person, garment, category=category)
+        output = vton.run(
+            person,
+            garment,
+            category=category,
+            garment_photo_type=garment_photo_type,
+        )
 
         buf = io.BytesIO()
         output.save(buf, format="JPEG", quality=90)
