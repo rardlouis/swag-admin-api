@@ -24,7 +24,7 @@ const emptyForm = {
   colorName: "",
   colorHex: "",
   price: "",
-  quantity: "",
+  quantity: "1",
   images: [],
   isActive: true,
 };
@@ -83,6 +83,32 @@ export default function ProductsEdit() {
 
   const updateField = (field, value) => {
     setForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const validateForm = () => {
+    const price = Number(form.price);
+    const quantity = Number(form.quantity);
+
+    if (form.name.trim().length < 2 || form.name.trim().length > 120) {
+      return "Product name must be 2 to 120 characters.";
+    }
+    if (form.description.trim().length > 100) {
+      return "Description must be 100 characters or less.";
+    }
+    if (!form.categoryId) {
+      return "Product category is required.";
+    }
+    if (!Number.isFinite(price) || price <= 0) {
+      return "Price must be greater than zero.";
+    }
+    if (!Number.isInteger(quantity) || quantity < 0) {
+      return "Quantity must be zero or greater.";
+    }
+    if (form.brand.trim().length > 100) {
+      return "Brand must be 100 characters or less.";
+    }
+
+    return "";
   };
 
   useEffect(() => {
@@ -179,6 +205,11 @@ export default function ProductsEdit() {
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError("");
+    const formError = validateForm();
+    if (formError) {
+      setError(formError);
+      return;
+    }
     setIsSaving(true);
 
     try {
@@ -225,8 +256,10 @@ export default function ProductsEdit() {
             <span>Product Name</span>
             <input
               value={form.name}
-              onChange={(e) => updateField("name", e.target.value)}
-              placeholder="Input product name"
+              onChange={(e) => updateField("name", e.target.value.slice(0, 120))}
+              placeholder="Product Name"
+              minLength={2}
+              maxLength={120}
               required
             />
           </label>
@@ -235,9 +268,11 @@ export default function ProductsEdit() {
             <span>Description</span>
             <input
               value={form.description}
-              onChange={(e) => updateField("description", e.target.value)}
-              placeholder="Input description"
+              onChange={(e) => updateField("description", e.target.value.slice(0, 100))}
+              placeholder="Description"
+              maxLength={100}
             />
+            <small className="product-field-hint">{form.description.length}/100</small>
           </label>
 
           <div className="product-add-row">
@@ -282,7 +317,7 @@ export default function ProductsEdit() {
 
             <label className="product-add-field">
               <span>Brand</span>
-              <input value={form.brand} onChange={(e) => updateField("brand", e.target.value)} />
+              <input value={form.brand} onChange={(e) => updateField("brand", e.target.value.slice(0, 100))} maxLength={100} />
             </label>
           </div>
 
@@ -360,12 +395,12 @@ export default function ProductsEdit() {
             </div>
           </div>
 
-          <div className="product-add-row">
+          <div className="product-add-row product-edit-stock-row">
             <label className="product-add-field">
               <span>Price</span>
               <input
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
                 value={form.price}
                 onChange={(e) => updateField("price", e.target.value)}
@@ -383,19 +418,19 @@ export default function ProductsEdit() {
                 required
               />
             </label>
-          </div>
 
-          <label className="product-add-field product-add-field-full product-add-select">
-            <span>Status Product</span>
-            <select
-              value={form.isActive ? "1" : "0"}
-              onChange={(e) => updateField("isActive", e.target.value === "1")}
-            >
-              <option value="1">Active</option>
-              <option value="0">Inactive</option>
-            </select>
-            <MdKeyboardArrowDown size={20} />
-          </label>
+            <label className="product-add-field product-add-select">
+              <span>Status Product</span>
+              <select
+                value={form.isActive ? "1" : "0"}
+                onChange={(e) => updateField("isActive", e.target.value === "1")}
+              >
+                <option value="1">Active</option>
+                <option value="0">Inactive</option>
+              </select>
+              <MdKeyboardArrowDown size={20} />
+            </label>
+          </div>
 
           {error && <p className="form-error">{error}</p>}
         </section>
@@ -408,6 +443,11 @@ export default function ProductsEdit() {
             </div>
 
             <div className="product-photo-grid">
+              {form.images[0]?.imageUrl ? (
+                <div className="product-large-preview">
+                  <img src={form.images[0].imageUrl} alt="Primary product preview" />
+                </div>
+              ) : null}
               {Array.from({ length: 4 }).map((_, index) => {
                 const image = form.images[index];
 

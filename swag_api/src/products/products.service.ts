@@ -49,7 +49,7 @@ export class ProductsService {
         .input('categoryId', sql.SmallInt, createProductDto.categoryId)
         .input('genderId', sql.TinyInt, createProductDto.genderId ?? null)
         .input('name', sql.NVarChar(255), createProductDto.name)
-        .input('description', sql.NVarChar(sql.MAX), createProductDto.description ?? null)
+        .input('description', sql.NVarChar(100), createProductDto.description ?? null)
         .input('price', sql.Decimal(10, 2), Number(createProductDto.price))
         .input('stockQty', sql.Int, quantity)
         .input('brand', sql.NVarChar(100), createProductDto.brand ?? null);
@@ -58,7 +58,7 @@ export class ProductsService {
       if (colorSchema.hasLegacyColorHex) request.input('colorHex', sql.NVarChar(7), colorInputs.colorHex);
       if (colorSchema.hasLegacyColorName) request.input('colorName', sql.NVarChar(100), colorInputs.colorName);
 
-      return request.input('isActive', sql.Bit, createProductDto.isActive ?? quantity > 0).query(`
+      return request.input('isActive', sql.Bit, createProductDto.isActive ?? true).query(`
           INSERT INTO PRODUCTS (
             category_id, gender_id, name, description, price, stock_qty,
             brand${colorColumns.length ? `, ${colorColumns.join(', ')}` : ''}, is_active
@@ -259,6 +259,9 @@ export class ProductsService {
 
   async findAll() {
     const color = await this.productColorSelect();
+    const hasDeletedColumn = await this.databaseService.columnExists('PRODUCTS', 'is_deleted');
+    const deletedSelect = hasDeletedColumn ? 'p.is_deleted AS isDeleted,' : 'CAST(0 AS bit) AS isDeleted,';
+    const deletedFilter = hasDeletedColumn ? 'AND ISNULL(p.is_deleted, 0) = 0' : '';
 
     return this.databaseService.query(`
       SELECT
@@ -269,6 +272,7 @@ export class ProductsService {
         p.stock_qty AS qty,
         p.brand,
         ${color.select},
+        ${deletedSelect}
         p.avg_rating AS avgRating,
         p.is_active AS isActive,
         p.created_at AS createdAt,
@@ -302,12 +306,15 @@ export class ProductsService {
         WHERE pss.product_id = p.product_id AND pss.stock_qty > 0
       ) sizes
       WHERE c.slug IN (${ALLOWED_CATEGORY_SLUGS})
+        ${deletedFilter}
       ORDER BY p.created_at DESC
     `);
   }
 
   async findOne(id: string) {
     const color = await this.productColorSelect();
+    const hasDeletedColumn = await this.databaseService.columnExists('PRODUCTS', 'is_deleted');
+    const deletedSelect = hasDeletedColumn ? 'p.is_deleted AS isDeleted,' : 'CAST(0 AS bit) AS isDeleted,';
 
     const rows = await this.databaseService.request((request) =>
       request.input('id', sql.UniqueIdentifier, id).query(`
@@ -319,6 +326,7 @@ export class ProductsService {
           p.stock_qty AS qty,
           p.brand,
           ${color.select},
+          ${deletedSelect}
           p.avg_rating AS avgRating,
           p.is_active AS isActive,
           p.created_at AS createdAt,
@@ -441,7 +449,7 @@ export class ProductsService {
         .input('categoryId', sql.SmallInt, updateProductDto.categoryId)
         .input('genderId', sql.TinyInt, updateProductDto.genderId ?? null)
         .input('name', sql.NVarChar(255), updateProductDto.name)
-        .input('description', sql.NVarChar(sql.MAX), updateProductDto.description ?? null)
+        .input('description', sql.NVarChar(100), updateProductDto.description ?? null)
         .input('price', sql.Decimal(10, 2), Number(updateProductDto.price))
         .input('stockQty', sql.Int, quantity)
         .input('brand', sql.NVarChar(100), updateProductDto.brand ?? null);
@@ -450,7 +458,7 @@ export class ProductsService {
       if (colorSchema.hasLegacyColorHex) request.input('colorHex', sql.NVarChar(7), colorInputs.colorHex);
       if (colorSchema.hasLegacyColorName) request.input('colorName', sql.NVarChar(100), colorInputs.colorName);
 
-      return request.input('isActive', sql.Bit, updateProductDto.isActive ?? quantity > 0).query(`
+      return request.input('isActive', sql.Bit, updateProductDto.isActive ?? true).query(`
           UPDATE PRODUCTS
           SET
             category_id = @categoryId,
@@ -493,15 +501,17 @@ export class ProductsService {
   }
 
   async remove(id: string) {
+    const hasDeletedColumn = await this.databaseService.columnExists('PRODUCTS', 'is_deleted');
+
     await this.databaseService.request((request) =>
       request.input('id', sql.UniqueIdentifier, id).query(`
         UPDATE PRODUCTS
-        SET is_active = 0
+        SET ${hasDeletedColumn ? 'is_deleted = 1' : 'is_active = 0'}
         WHERE product_id = @id
       `),
     );
 
-    return { id, isActive: false };
+    return { id, isDeleted: hasDeletedColumn, isActive: !hasDeletedColumn };
   }
 
   private validateProduct(productDto: CreateProductDto | UpdateProductDto) {
@@ -513,8 +523,16 @@ export class ProductsService {
       throw new BadRequestException('Product category is required');
     }
 
-    if (productDto.price === undefined || Number(productDto.price) < 0) {
-      throw new BadRequestException('A valid price is required');
+    if (productDto.name.trim().length < 2 || productDto.name.trim().length > 120) {
+      throw new BadRequestException('Product name must be 2 to 120 characters');
+    }
+
+    if (productDto.description && productDto.description.trim().length > 100) {
+      throw new BadRequestException('Description must be 100 characters or less');
+    }
+
+    if (productDto.price === undefined || Number(productDto.price) <= 0) {
+      throw new BadRequestException('Price must be greater than zero');
     }
 
     if (productDto.quantity === undefined || Number(productDto.quantity) < 0) {

@@ -68,6 +68,11 @@ export class AdminController {
     return this.adminService.sendChatMessage(id, text);
   }
 
+  @Post('chats/:id/read')
+  markChatRead(@Param('id') id: string) {
+    return this.adminService.markChatRead(id);
+  }
+
   @Get('notifications')
   notifications() {
     return this.adminService.notifications();

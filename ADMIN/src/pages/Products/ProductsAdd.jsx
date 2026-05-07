@@ -23,7 +23,7 @@ const initialForm = {
   colorName: "",
   colorHex: "",
   price: "",
-  quantity: "",
+  quantity: "1",
   images: [],
   isActive: true,
 };
@@ -49,6 +49,32 @@ export default function ProductsAdd() {
 
   const updateField = (field, value) => {
     setForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const validateForm = () => {
+    const price = Number(form.price);
+    const quantity = Number(form.quantity);
+
+    if (form.name.trim().length < 2 || form.name.trim().length > 120) {
+      return "Product name must be 2 to 120 characters.";
+    }
+    if (form.description.trim().length > 100) {
+      return "Description must be 100 characters or less.";
+    }
+    if (!form.categoryId) {
+      return "Product category is required.";
+    }
+    if (!Number.isFinite(price) || price <= 0) {
+      return "Price must be greater than zero.";
+    }
+    if (!Number.isInteger(quantity) || quantity < 0) {
+      return "Quantity must be zero or greater.";
+    }
+    if (form.brand.trim().length > 100) {
+      return "Brand must be 100 characters or less.";
+    }
+
+    return "";
   };
 
   useEffect(() => {
@@ -128,6 +154,11 @@ export default function ProductsAdd() {
   const handleSubmit = async (event) => {
     event.preventDefault();
     setError("");
+    const formError = validateForm();
+    if (formError) {
+      setError(formError);
+      return;
+    }
     setIsSaving(true);
 
     try {
@@ -165,8 +196,10 @@ export default function ProductsAdd() {
             <span>Product Name</span>
             <input
               value={form.name}
-              onChange={(e) => updateField("name", e.target.value)}
-              placeholder="Input product name"
+              onChange={(e) => updateField("name", e.target.value.slice(0, 120))}
+              placeholder="Product Name"
+              minLength={2}
+              maxLength={120}
               required
             />
           </label>
@@ -175,9 +208,11 @@ export default function ProductsAdd() {
             <span>Description</span>
             <input
               value={form.description}
-              onChange={(e) => updateField("description", e.target.value)}
-              placeholder="Input description"
+              onChange={(e) => updateField("description", e.target.value.slice(0, 100))}
+              placeholder="Description"
+              maxLength={100}
             />
+            <small className="product-field-hint">{form.description.length}/100</small>
           </label>
 
           <div className="product-add-row">
@@ -224,8 +259,9 @@ export default function ProductsAdd() {
               <span>Brand</span>
               <input
                 value={form.brand}
-                onChange={(e) => updateField("brand", e.target.value)}
-                placeholder="Input brand"
+                onChange={(e) => updateField("brand", e.target.value.slice(0, 100))}
+                placeholder="Brand"
+                maxLength={100}
               />
             </label>
           </div>
@@ -312,11 +348,11 @@ export default function ProductsAdd() {
               <span>Price</span>
               <input
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
                 value={form.price}
                 onChange={(e) => updateField("price", e.target.value)}
-                placeholder="Input price"
+                placeholder="Price"
                 required
               />
             </label>
@@ -328,7 +364,7 @@ export default function ProductsAdd() {
                 min="0"
                 value={form.quantity}
                 onChange={(e) => updateField("quantity", e.target.value)}
-                placeholder="Input stock"
+                placeholder="Stock"
                 required
               />
             </label>

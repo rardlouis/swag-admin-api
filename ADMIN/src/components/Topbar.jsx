@@ -4,7 +4,6 @@ import {
   MdChat,
   MdLogout,
   MdNotifications,
-  MdSearch,
   MdSettings,
 } from "react-icons/md";
 import { apiGet } from "../api.js";
@@ -85,10 +84,7 @@ export default function Topbar() {
 
   return (
     <div className="topbar">
-      <div className="topbar-search">
-        <MdSearch size={18} color="#888" />
-        <input type="text" placeholder="Search product" />
-      </div>
+      <div />
 
       <div className="topbar-right" ref={topbarActionsRef}>
         <button

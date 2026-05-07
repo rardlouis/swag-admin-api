@@ -19,6 +19,8 @@ type MessageRow = {
   from: 'admin' | 'customer';
   text: string;
   time: Date;
+  isRead: boolean;
+  readAt: Date | null;
 };
 
 @Injectable()
@@ -71,7 +73,9 @@ export class ChatService {
           CONVERT(varchar(36), m.convo_id) AS convoId,
           CASE WHEN m.sender_id = c.buyer_id THEN 'customer' ELSE 'admin' END AS [from],
           m.body AS text,
-          m.sent_at AS time
+          m.sent_at AS time,
+          m.is_read AS isRead,
+          m.read_at AS readAt
         FROM MESSAGES m
         INNER JOIN CONVERSATIONS c ON c.convo_id = m.convo_id
         WHERE c.buyer_id = @userId AND c.is_active = 1
@@ -100,6 +104,8 @@ export class ChatService {
           from: message.from,
           text: message.text,
           time: this.clockTime(message.time),
+          isRead: Boolean(message.isRead),
+          readAt: this.clockTime(message.readAt),
         })),
         product: conversation.productName
           ? {
@@ -222,7 +228,8 @@ export class ChatService {
         .input('sellerId', sql.UniqueIdentifier, conversation[0].sellerId)
         .query(`
           UPDATE MESSAGES
-          SET is_read = 1
+          SET is_read = 1,
+              read_at = COALESCE(read_at, GETDATE())
           WHERE convo_id = @conversationId AND sender_id = @sellerId
         `),
     );

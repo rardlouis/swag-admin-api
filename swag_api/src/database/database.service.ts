@@ -20,6 +20,8 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
   async onModuleInit() {
     await this.ensureBaseLookups();
     await this.ensureUserProfileColumns();
+    await this.ensureProductSoftDeleteColumn();
+    await this.ensureMessageReadAtColumn();
     await this.ensureAdminUser();
   }
 
@@ -161,6 +163,32 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
       await this.query(`
         ALTER TABLE USERS
         ADD skin_hex NVARCHAR(7) NULL
+      `);
+    }
+  }
+
+  private async ensureProductSoftDeleteColumn() {
+    if (!(await this.tableExists('PRODUCTS'))) {
+      return;
+    }
+
+    if (!(await this.columnExists('PRODUCTS', 'is_deleted'))) {
+      await this.query(`
+        ALTER TABLE PRODUCTS
+        ADD is_deleted BIT NOT NULL CONSTRAINT DF_PRODUCTS_IS_DELETED DEFAULT ((0))
+      `);
+    }
+  }
+
+  private async ensureMessageReadAtColumn() {
+    if (!(await this.tableExists('MESSAGES'))) {
+      return;
+    }
+
+    if (!(await this.columnExists('MESSAGES', 'read_at'))) {
+      await this.query(`
+        ALTER TABLE MESSAGES
+        ADD read_at DATETIME2(7) NULL
       `);
     }
   }

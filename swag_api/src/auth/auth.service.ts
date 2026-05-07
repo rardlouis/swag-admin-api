@@ -16,6 +16,12 @@ type AppRegisterBody = {
   id_type?: string;
   id_number?: string;
   shipping_address?: string;
+  address_house_no?: string | null;
+  address_street?: string | null;
+  address_barangay?: string | null;
+  address_city?: string | null;
+  address_province?: string | null;
+  address_zip?: string | null;
   fashion_style?: string;
   preferred_size?: string;
   skin_hex?: string | null;
@@ -95,6 +101,19 @@ export class AuthService {
           u.password_hash AS passwordHash,
           u.full_name,
           u.phone,
+          NULLIF(CONCAT(
+            COALESCE(NULLIF(a.street, ''), ''),
+            CASE WHEN NULLIF(a.barangay, '') IS NOT NULL THEN CONCAT(', ', a.barangay) ELSE '' END,
+            CASE WHEN NULLIF(a.city, '') IS NOT NULL AND a.city <> 'Not specified' THEN CONCAT(', ', a.city) ELSE '' END,
+            CASE WHEN NULLIF(a.province, '') IS NOT NULL THEN CONCAT(', ', a.province) ELSE '' END,
+            CASE WHEN NULLIF(a.postal_code, '') IS NOT NULL THEN CONCAT(' ', a.postal_code) ELSE '' END
+          ), '') AS shipping_address,
+          a.house_no AS address_house_no,
+          a.street_name AS address_street,
+          a.barangay AS address_barangay,
+          a.city AS address_city,
+          a.province AS address_province,
+          a.postal_code AS address_zip,
           u.id_number,
           u.profile_photo_url,
           u.skin_tone_detected,
@@ -110,6 +129,25 @@ export class AuthService {
         FROM USERS u
         LEFT JOIN FASHION_STYLES fs ON fs.style_id = u.style_id
         LEFT JOIN SIZE_STANDARDS ps ON ps.size_id = u.preferred_size_id
+        OUTER APPLY (
+          SELECT TOP 1
+            street,
+            CASE
+              WHEN CHARINDEX(', ', street) > 0 THEN LEFT(street, CHARINDEX(', ', street) - 1)
+              ELSE street
+            END AS house_no,
+            CASE
+              WHEN CHARINDEX(', ', street) > 0 THEN SUBSTRING(street, CHARINDEX(', ', street) + 2, LEN(street))
+              ELSE ''
+            END AS street_name,
+            barangay,
+            city,
+            province,
+            postal_code
+          FROM USER_ADDRESSES
+          WHERE user_id = u.user_id
+          ORDER BY is_default DESC, created_at DESC
+        ) a
         WHERE u.email = @email AND u.is_active = 1 AND u.is_admin = 0
       `),
     );
@@ -148,6 +186,7 @@ export class AuthService {
     if (!email || !password || !fullName) {
       throw new BadRequestException('Email, password, and full name are required');
     }
+    this.validateAppAccountFields({ email, password, fullName, phone, shippingAddress });
 
     if (!bodyChestCm || !bodyWaistCm || !bodyHipCm) {
       throw new BadRequestException('Chest, waist, and hip measurements are required');
@@ -322,6 +361,15 @@ export class AuthService {
     const email = payload.email?.trim().toLowerCase() ?? '';
     const fullName = payload.full_name?.trim() ?? '';
     const phone = payload.phone?.trim() || null;
+    const addressHouseNo = payload.address_house_no?.trim() || null;
+    const addressStreet = payload.address_street?.trim() || null;
+    const addressBarangay = payload.address_barangay?.trim() || null;
+    const addressCity = payload.address_city?.trim() || null;
+    const addressProvince = payload.address_province?.trim() || null;
+    const addressZip = payload.address_zip?.trim() || null;
+    const shippingAddress = payload.shipping_address?.trim() || [addressHouseNo, addressStreet]
+      .filter(Boolean)
+      .join(', ') || null;
 
     if (!userId?.trim()) {
       throw new BadRequestException('User id is required');
@@ -330,6 +378,13 @@ export class AuthService {
     if (!email || !fullName) {
       throw new BadRequestException('Full name and email are required');
     }
+    this.validateAppAccountFields({
+      email,
+      fullName,
+      phone,
+      shippingAddress,
+      addressZip,
+    });
 
     const existing = await this.databaseService.request<{ count: number }>((request) =>
       request
@@ -350,13 +405,49 @@ export class AuthService {
         .input('userId', sql.UniqueIdentifier, userId)
         .input('email', sql.NVarChar(255), email)
         .input('fullName', sql.NVarChar(150), fullName)
-        .input('phone', sql.NVarChar(20), phone).query(`
+        .input('phone', sql.NVarChar(20), phone)
+        .input('shippingAddress', sql.NVarChar(255), shippingAddress)
+        .input('barangay', sql.NVarChar(100), addressBarangay)
+        .input('city', sql.NVarChar(100), addressCity || 'Not specified')
+        .input('province', sql.NVarChar(100), addressProvince)
+        .input('postalCode', sql.NVarChar(10), addressZip).query(`
           UPDATE USERS
           SET
             email = @email,
             full_name = @fullName,
             phone = @phone
           WHERE user_id = @userId AND is_active = 1 AND is_admin = 0
+
+          DECLARE @addressId uniqueidentifier = (
+            SELECT TOP 1 address_id
+            FROM USER_ADDRESSES
+            WHERE user_id = @userId
+            ORDER BY is_default DESC, created_at DESC
+          );
+
+          IF @addressId IS NOT NULL
+          BEGIN
+            UPDATE USER_ADDRESSES
+            SET
+              recipient_name = @fullName,
+              phone = @phone,
+              street = COALESCE(@shippingAddress, ''),
+              barangay = @barangay,
+              city = @city,
+              province = @province,
+              postal_code = @postalCode,
+              is_default = 1
+            WHERE address_id = @addressId;
+          END
+          ELSE IF NULLIF(@shippingAddress, '') IS NOT NULL
+          BEGIN
+            INSERT INTO USER_ADDRESSES (
+              user_id, label, recipient_name, phone, street, barangay, city, province, postal_code, is_default
+            )
+            VALUES (
+              @userId, 'Home', @fullName, @phone, @shippingAddress, @barangay, @city, @province, @postalCode, 1
+            );
+          END
         `),
     );
 
@@ -414,6 +505,55 @@ export class AuthService {
     // Existing local data has used plain text admin passwords. Keep that
     // compatible so the admin account can be repaired without extra packages.
     return password === passwordHash;
+  }
+
+  private validateAppAccountFields({
+    email,
+    password,
+    fullName,
+    phone,
+    shippingAddress,
+    addressZip,
+  }: {
+    email: string;
+    password?: string;
+    fullName: string;
+    phone?: string | null;
+    shippingAddress?: string | null;
+    addressZip?: string | null;
+  }) {
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new BadRequestException('A valid email is required');
+    }
+
+    if (password !== undefined) {
+      if (password.length < 8 || password.length > 64 || !/[A-Z]/.test(password) || !/\d/.test(password)) {
+        throw new BadRequestException('Password must be 8 to 64 characters and include an uppercase letter and number');
+      }
+    }
+
+    const nameParts = fullName.trim().split(/\s+/);
+    if (fullName.length > 100 || nameParts.length < 2) {
+      throw new BadRequestException('First name and last name are required');
+    }
+
+    for (const [index, part] of nameParts.entries()) {
+      if (part.length < 2 || part.length > 40 || !/^[A-Za-z]+(?:[ '-][A-Za-z]+)*$/.test(part)) {
+        throw new BadRequestException(`${index === 0 ? 'First' : 'Last'} name can only contain letters and must be 2 to 40 characters`);
+      }
+    }
+
+    if (phone && !/^9\d{9}$/.test(phone)) {
+      throw new BadRequestException('Phone must be a valid 10-digit PH mobile number');
+    }
+
+    if (shippingAddress && shippingAddress.length > 255) {
+      throw new BadRequestException('Shipping address must be 255 characters or less');
+    }
+
+    if (addressZip && !/^\d{4}$/.test(addressZip)) {
+      throw new BadRequestException('Zip code must be 4 digits');
+    }
   }
 
   private normalizeIdType(idType?: string) {
@@ -526,6 +666,19 @@ export class AuthService {
           u.email,
           u.full_name,
           u.phone,
+          NULLIF(CONCAT(
+            COALESCE(NULLIF(a.street, ''), ''),
+            CASE WHEN NULLIF(a.barangay, '') IS NOT NULL THEN CONCAT(', ', a.barangay) ELSE '' END,
+            CASE WHEN NULLIF(a.city, '') IS NOT NULL AND a.city <> 'Not specified' THEN CONCAT(', ', a.city) ELSE '' END,
+            CASE WHEN NULLIF(a.province, '') IS NOT NULL THEN CONCAT(', ', a.province) ELSE '' END,
+            CASE WHEN NULLIF(a.postal_code, '') IS NOT NULL THEN CONCAT(' ', a.postal_code) ELSE '' END
+          ), '') AS shipping_address,
+          a.house_no AS address_house_no,
+          a.street_name AS address_street,
+          a.barangay AS address_barangay,
+          a.city AS address_city,
+          a.province AS address_province,
+          a.postal_code AS address_zip,
           u.id_number,
           u.profile_photo_url,
           u.skin_tone_detected,
@@ -541,6 +694,25 @@ export class AuthService {
         FROM USERS u
         LEFT JOIN FASHION_STYLES fs ON fs.style_id = u.style_id
         LEFT JOIN SIZE_STANDARDS ps ON ps.size_id = u.preferred_size_id
+        OUTER APPLY (
+          SELECT TOP 1
+            street,
+            CASE
+              WHEN CHARINDEX(', ', street) > 0 THEN LEFT(street, CHARINDEX(', ', street) - 1)
+              ELSE street
+            END AS house_no,
+            CASE
+              WHEN CHARINDEX(', ', street) > 0 THEN SUBSTRING(street, CHARINDEX(', ', street) + 2, LEN(street))
+              ELSE ''
+            END AS street_name,
+            barangay,
+            city,
+            province,
+            postal_code
+          FROM USER_ADDRESSES
+          WHERE user_id = u.user_id
+          ORDER BY is_default DESC, created_at DESC
+        ) a
         WHERE u.user_id = @userId AND u.is_active = 1 AND u.is_admin = 0
       `),
     );

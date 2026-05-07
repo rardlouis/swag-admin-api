@@ -324,6 +324,21 @@
   color: #c62828;
 }
 
+.action-btn--stock {
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.action-btn--stock:hover:not(:disabled) {
+  background: #fff3e0;
+  color: #e65100;
+}
+
+.action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 /* ── Pagination ── */
 .products-pagination {
   display: flex;

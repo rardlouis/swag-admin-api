@@ -135,6 +135,14 @@ export function ChatProvider({ children }) {
         c.id === convId ? { ...c, unread: 0 } : c
       )
     );
+
+    apiPost(`/admin/chats/${convId}/read`, {})
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setConversations(data);
+        }
+      })
+      .catch(() => undefined);
   };
 
   const sendMessage = async (text, convId = activeId) => {

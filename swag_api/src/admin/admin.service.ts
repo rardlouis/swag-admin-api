@@ -8,6 +8,8 @@ type ChatMessageRow = {
   from: string;
   text: string;
   time: Date;
+  isRead: boolean;
+  readAt: Date | null;
 };
 
 type NotificationRow = {
@@ -345,7 +347,9 @@ export class AdminService {
           ELSE 'customer'
         END AS [from],
         m.body AS text,
-        m.sent_at AS time
+        m.sent_at AS time,
+        m.is_read AS isRead,
+        m.read_at AS readAt
       FROM MESSAGES m
       INNER JOIN CONVERSATIONS c ON c.convo_id = m.convo_id
       INNER JOIN USERS sender ON sender.user_id = m.sender_id
@@ -375,14 +379,16 @@ export class AdminService {
           from: message.from,
           text: message.text,
           time: this.clockTime(message.time),
+          isRead: Boolean(message.isRead),
+          readAt: this.clockTime(message.readAt),
         })),
         product: conversation.productName
           ? {
               name: conversation.productName,
               price: this.formatPeso(conversation.productPrice),
-              orderId: `Conversation ${conversation.id.slice(0, 8).toUpperCase()}`,
+              orderId: conversation.productName,
               imageUrl: conversation.imageUrl,
-              emoji: 'Product',
+              emoji: 'Item',
             }
           : null,
       };
@@ -420,6 +426,34 @@ export class AdminService {
           UPDATE CONVERSATIONS
           SET last_message_at = GETDATE()
           WHERE convo_id = @conversationId
+        `),
+    );
+
+    return this.chats();
+  }
+
+  async markChatRead(conversationId: string) {
+    const conversation = await this.databaseService.request<{ buyerId: string }>((request) =>
+      request.input('conversationId', conversationId).query(`
+        SELECT CONVERT(varchar(36), buyer_id) AS buyerId
+        FROM CONVERSATIONS
+        WHERE convo_id = @conversationId AND is_active = 1
+      `),
+    );
+
+    if (!conversation[0]) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    await this.databaseService.request((request) =>
+      request
+        .input('conversationId', conversationId)
+        .input('buyerId', conversation[0].buyerId)
+        .query(`
+          UPDATE MESSAGES
+          SET is_read = 1,
+              read_at = COALESCE(read_at, GETDATE())
+          WHERE convo_id = @conversationId AND sender_id = @buyerId
         `),
     );
 

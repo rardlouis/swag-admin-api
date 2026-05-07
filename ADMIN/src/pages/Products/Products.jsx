@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { apiDelete, apiGet, formatDate, formatPeso } from "../../api.js";
+import { apiDelete, apiGet, apiPatch, formatDate, formatPeso } from "../../api.js";
 import {
   MdSearch, MdFilterList, MdFileDownload, MdAdd,
   MdVisibility, MdEdit, MdDelete, MdUnfoldMore,
@@ -25,6 +25,7 @@ export default function Products() {
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState([]);
   const [deleteId, setDeleteId] = useState(null);
+  const [stockId, setStockId] = useState(null);
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -36,7 +37,7 @@ export default function Products() {
     Promise.all([apiGet("/products"), apiGet("/products/meta/lookups")])
       .then(([productData, lookupData]) => {
         if (!isMounted) return;
-        setProducts(productData);
+        setProducts(productData.filter((product) => !product.isDeleted));
         setCategories(lookupData.categories ?? []);
       })
       .catch((err) => {
@@ -91,10 +92,35 @@ export default function Products() {
 
   const handleDelete = async () => {
     await apiDelete(`/products/${deleteId}`);
-    setProducts((current) => current.map((product) => (
-      product.id === deleteId ? { ...product, isActive: false, qty: 0 } : product
-    )));
+    setProducts((current) => current.filter((product) => product.id !== deleteId));
     setDeleteId(null);
+  };
+
+  const markOutOfStock = async (product) => {
+    const fullProduct = await apiGet(`/products/${product.id}`);
+    const payload = {
+      name: fullProduct.name,
+      description: fullProduct.description ?? null,
+      brand: fullProduct.brand ?? null,
+      categoryId: fullProduct.categoryId,
+      genderId: fullProduct.genderId ?? null,
+      sizeId: fullProduct.sizeId ?? null,
+      garmentTypeId: fullProduct.garmentTypeId ?? null,
+      measurements: fullProduct.measurements ?? [],
+      colorId: fullProduct.colorId ?? null,
+      colorName: fullProduct.colorName ?? null,
+      colorHex: fullProduct.colorHex ?? null,
+      price: Number(fullProduct.price),
+      quantity: 0,
+      imageUrls: fullProduct.images?.map((image) => image.imageUrl) ?? [],
+      isActive: fullProduct.isActive,
+    };
+
+    await apiPatch(`/products/${product.id}`, payload);
+    setProducts((current) => current.map((item) => (
+      item.id === product.id ? { ...item, qty: 0 } : item
+    )));
+    setStockId(null);
   };
 
   const handleTabClick = (tab) => {
@@ -218,6 +244,14 @@ export default function Products() {
                     >
                       <MdEdit size={17} />
                     </button>
+                    <button
+                      className="action-btn action-btn--stock"
+                      title="Mark Out of Stock"
+                      onClick={() => setStockId(product.id)}
+                      disabled={product.qty <= 0}
+                    >
+                      0
+                    </button>
                     <button className="action-btn action-btn--delete" title="Delete" onClick={() => setDeleteId(product.id)}><MdDelete size={17} /></button>
                   </div>
                 </td>
@@ -261,10 +295,31 @@ export default function Products() {
         <div className="modal-overlay" onClick={() => setDeleteId(null)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <h3>Delete Product?</h3>
-            <p>Are you sure you want to delete <strong>{deleteId}</strong>? This cannot be undone.</p>
+            <p>Are you sure you want to delete <strong>"{products.find((product) => product.id === deleteId)?.name ?? "this product"}"</strong>?</p>
             <div className="modal-actions">
               <button className="btn-outline" onClick={() => setDeleteId(null)}>Cancel</button>
               <button className="btn-danger" onClick={handleDelete}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {stockId && (
+        <div className="modal-overlay" onClick={() => setStockId(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <h3>Mark Out of Stock?</h3>
+            <p>This will set <strong>"{products.find((product) => product.id === stockId)?.name ?? "this product"}"</strong> quantity to 0.</p>
+            <div className="modal-actions">
+              <button className="btn-outline" onClick={() => setStockId(null)}>Cancel</button>
+              <button
+                className="btn-danger"
+                onClick={() => {
+                  const product = products.find((item) => item.id === stockId);
+                  if (product) markOutOfStock(product).catch((err) => setError(err.message));
+                }}
+              >
+                Out of Stock
+              </button>
             </div>
           </div>
         </div>

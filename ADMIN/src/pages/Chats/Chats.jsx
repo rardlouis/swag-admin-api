@@ -15,7 +15,7 @@ function ConvItem({ conv, active, onClick }) {
         </div>
       </div>
       <div className="conv-info">
-        <p className="conv-id">{conv.id}</p>
+        <p className="conv-id">{conv.product?.name ?? conv.id}</p>
         <p className="conv-name">{conv.name}</p>
         <p className="conv-last">{conv.lastMsg}</p>
       </div>
@@ -44,7 +44,11 @@ export default function Chats() {
   };
 
   const filtered = conversations.filter((c) => {
-    const matchSearch = c.name.toLowerCase().includes(search.toLowerCase()) || c.id.includes(search);
+    const query = search.toLowerCase();
+    const matchSearch =
+      c.name.toLowerCase().includes(query) ||
+      c.product?.name?.toLowerCase().includes(query) ||
+      c.id.toLowerCase().includes(query);
     if (!matchSearch) return false;
     if (filter === "All")     return true;
     if (filter === "Unread")  return c.unread > 0;
