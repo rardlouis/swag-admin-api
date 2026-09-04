@@ -48,6 +48,47 @@ export class TryonService {
     });
   }
 
+  async uploadThreePiece(
+    body: Record<string, string | string[] | undefined>,
+    files: {
+      person_image?: UploadedTryonFile[];
+      dress_image?: UploadedTryonFile[];
+      bottom_image?: UploadedTryonFile[];
+      top_image?: UploadedTryonFile[];
+    },
+  ) {
+    const personImage = files.person_image?.[0];
+    const dressImage = files.dress_image?.[0];
+    const bottomImage = files.bottom_image?.[0];
+    const topImage = files.top_image?.[0];
+
+    if (!personImage || !dressImage || !bottomImage || !topImage) {
+      throw new HttpException('person_image, dress_image, bottom_image, and top_image are required.', 400);
+    }
+
+    const form = new FormData();
+    this.appendFile(form, 'person_image', personImage, 'person.jpg');
+    this.appendFile(form, 'dress_image', dressImage, 'dress.jpg');
+    this.appendFile(form, 'bottom_image', bottomImage, 'bottom.jpg');
+    this.appendFile(form, 'top_image', topImage, 'top.jpg');
+
+    Object.entries(body).forEach(([key, value]) => {
+      if (Array.isArray(value)) {
+        value.forEach((entry) => form.append(key, entry));
+        return;
+      }
+
+      if (value !== undefined) {
+        form.append(key, value);
+      }
+    });
+
+    return this.forwardJson(`${this.vtonBaseUrl}/v1/tryon/upload-three-piece`, {
+      method: 'POST',
+      body: form,
+    });
+  }
+
   async progress(jobId: string) {
     return this.forwardJson(`${this.vtonBaseUrl}/v1/tryon/progress/${encodeURIComponent(jobId)}`);
   }

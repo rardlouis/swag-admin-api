@@ -29,6 +29,7 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto) {
     this.validateProduct(createProductDto);
+    await this.validateCategoryGarmentType(createProductDto);
 
     const quantity = Number(createProductDto.quantity ?? 0);
     const colorSchema = await this.productColorSchema();
@@ -434,6 +435,7 @@ export class ProductsService {
 
   async update(id: string, updateProductDto: UpdateProductDto) {
     this.validateProduct(updateProductDto);
+    await this.validateCategoryGarmentType(updateProductDto);
     const quantity = Number(updateProductDto.quantity ?? 0);
     const colorSchema = await this.productColorSchema();
     const colorInputs = await this.resolveColorInputs(updateProductDto, colorSchema);
@@ -538,6 +540,49 @@ export class ProductsService {
     if (productDto.quantity === undefined || Number(productDto.quantity) < 0) {
       throw new BadRequestException('A valid quantity is required');
     }
+  }
+
+  private async validateCategoryGarmentType(productDto: CreateProductDto | UpdateProductDto) {
+    if (!productDto.garmentTypeId) return;
+
+    const rows = await this.databaseService.request<{
+      categorySlug: string;
+      garmentType: string | null;
+    }>((request) =>
+      request
+        .input('categoryId', sql.SmallInt, Number(productDto.categoryId))
+        .input('garmentTypeId', sql.TinyInt, Number(productDto.garmentTypeId))
+        .query(`
+          SELECT c.slug AS categorySlug, sgt.label AS garmentType
+          FROM CATEGORIES c
+          LEFT JOIN SIZE_GARMENT_TYPES sgt ON sgt.garment_type_id = @garmentTypeId
+          WHERE c.category_id = @categoryId
+        `),
+    );
+
+    const row = rows[0];
+    if (!row || !row.garmentType) {
+      throw new BadRequestException('Selected product category or garment type does not exist');
+    }
+
+    const expectedCategorySlug = this.categorySlugForGarmentType(row.garmentType);
+    if (expectedCategorySlug && row.categorySlug !== expectedCategorySlug) {
+      throw new BadRequestException(`Garment type "${row.garmentType}" must use category "${expectedCategorySlug}"`);
+    }
+  }
+
+  private categorySlugForGarmentType(garmentType: string) {
+    const value = garmentType.toLowerCase();
+    if (value.includes('bottom') || value.includes('pant') || value.includes('short') || value.includes('skirt')) {
+      return 'bottoms';
+    }
+    if (value.includes('dress') || value.includes('jumpsuit') || value.includes('one')) {
+      return 'dresses';
+    }
+    if (value.includes('top') || value.includes('shirt') || value.includes('hoodie') || value.includes('jacket')) {
+      return 'tops';
+    }
+    return null;
   }
 
   private async productColorSchema(): Promise<ProductColorSchema> {

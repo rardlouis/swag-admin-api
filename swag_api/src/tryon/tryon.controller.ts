@@ -30,6 +30,31 @@ export class TryonController {
     return this.tryonService.upload(body, files);
   }
 
+  @Post('upload-three-piece')
+  @UseInterceptors(
+    FileFieldsInterceptor(
+      [
+        { name: 'person_image', maxCount: 1 },
+        { name: 'dress_image', maxCount: 1 },
+        { name: 'bottom_image', maxCount: 1 },
+        { name: 'top_image', maxCount: 1 },
+      ],
+      {
+        storage: memoryStorage(),
+        limits: {
+          files: 4,
+          fileSize: 8 * 1024 * 1024,
+        },
+        fileFilter: (_request, file, callback) => {
+          callback(null, /^image\/(png|jpe?g|webp|heic|heif)$/i.test(file.mimetype));
+        },
+      },
+    ),
+  )
+  uploadThreePiece(@Body() body: Record<string, string | string[] | undefined>, @UploadedFiles() files) {
+    return this.tryonService.uploadThreePiece(body, files);
+  }
+
   @Get('progress/:jobId')
   progress(@Param('jobId') jobId: string) {
     return this.tryonService.progress(jobId);
