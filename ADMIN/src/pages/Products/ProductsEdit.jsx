@@ -347,7 +347,7 @@ export default function ProductsEdit() {
             <section className="measurements-panel">
               <div className="measurements-head">
                 <h3>Custom Garment Measurements</h3>
-                <p>Defaults come from SIZE_GARMENT_MEASUREMENTS. Edits here save as product-specific cm values.</p>
+                <p>Default measurements come from garment sizes. Edit them here depending on the product's specific measurements in cm.</p>
               </div>
               <div className="measurements-grid">
                 {form.measurements.map((measurement) => (
