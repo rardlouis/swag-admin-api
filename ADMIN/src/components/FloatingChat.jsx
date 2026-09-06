@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { MdChatBubbleOutline, MdClose, MdSearch, MdSend, MdSmartToy, MdPerson } from "react-icons/md";
 import { useChatContext } from "../context/ChatContext.jsx";
+import { containsProfanity, PROFANITY_ERROR } from "../profanity.js";
 import "./FloatingChat.css";
 
 export default function FloatingChat() {
@@ -47,6 +48,10 @@ export default function FloatingChat() {
   const handleSend = (convId) => {
     const text = inputs[convId]?.trim();
     if (!text) return;
+    if (containsProfanity(text)) {
+      window.alert(PROFANITY_ERROR);
+      return;
+    }
 
     sendMessage(text, convId);
     setInputs((prev) => ({ ...prev, [convId]: "" }));

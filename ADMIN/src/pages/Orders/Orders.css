@@ -213,6 +213,13 @@
   flex-shrink: 0;
 }
 
+.orders-thumb img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
 .orders-id {
   font-size: 10px;
   color: #bbb;
@@ -224,6 +231,18 @@
   font-weight: 600;
   color: #1a1a2e;
   margin: 0;
+}
+
+.order-item-select {
+  max-width: 240px;
+  margin-top: 5px;
+  border: 1px solid #dbeafe;
+  border-radius: 6px;
+  background: #fff;
+  color: #2563eb;
+  font-size: 11px;
+  padding: 4px 8px;
+  outline: none;
 }
 
 /* ── Color Cell ── */
@@ -430,4 +449,32 @@
 .status-cancelled {
   background: #fdecea;
   color: #c62828;
+}
+
+.status-select {
+  min-width: 138px;
+  border: 1px solid transparent;
+  border-radius: 20px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  outline: none;
+  cursor: pointer;
+}
+
+.status-order-placed,
+.status-order-confirmed {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+
+.status-order-processed,
+.status-ready-to-ship {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.status-delivered {
+  background: #e8f5e9;
+  color: #2e7d32;
 }

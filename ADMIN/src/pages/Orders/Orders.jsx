@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { apiGet, formatDate, formatPeso } from "../../api.js";
+import { apiGet, apiPatch, formatDate, formatPeso, imageUrl } from "../../api.js";
 import {
   MdSearch, MdFilterList, MdFileDownload,
   MdVisibility, MdEdit, MdDelete, MdUnfoldMore,
@@ -9,6 +9,8 @@ import {
 import "./Orders.css";
 
 const TABS = ["All Orders", "Shipping", "Completed", "Cancel"];
+const ORDER_STATUSES = ["Order Placed", "Order Confirmed", "Order Processed", "Ready to Ship", "Delivered", "Cancelled"];
+const SHIPPING_STATUSES = ["order placed", "order confirmed", "order processed", "ready to ship", "confirmed", "shipped", "shipping"];
 const PAGE_SIZE = 10;
 
 export default function Orders() {
@@ -23,6 +25,7 @@ export default function Orders() {
   const [selected, setSelected] = useState([]);
   const [deleteId, setDeleteId] = useState(null);
   const [orders, setOrders] = useState([]);
+  const [selectedOrderItems, setSelectedOrderItems] = useState({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -35,7 +38,7 @@ export default function Orders() {
 
   const tabCounts = useMemo(() => ({
     "All Orders": orders.length,
-    Shipping: orders.filter((o) => ["confirmed", "shipped", "shipping"].includes(o.status?.toLowerCase())).length,
+    Shipping: orders.filter((o) => SHIPPING_STATUSES.includes(o.status?.toLowerCase())).length,
     Completed: orders.filter((o) => ["delivered", "completed"].includes(o.status?.toLowerCase())).length,
     Cancel: orders.filter((o) => ["cancelled", "cancel"].includes(o.status?.toLowerCase())).length,
   }), [orders]);
@@ -44,7 +47,7 @@ export default function Orders() {
     const normalizedStatus = o.status?.toLowerCase();
     const matchesTab =
       activeTab === "All Orders" ||
-      (activeTab === "Shipping" && ["confirmed", "shipped", "shipping"].includes(normalizedStatus)) ||
+      (activeTab === "Shipping" && SHIPPING_STATUSES.includes(normalizedStatus)) ||
       (activeTab === "Completed" && ["delivered", "completed"].includes(normalizedStatus)) ||
       (activeTab === "Cancel" && ["cancelled", "cancel"].includes(normalizedStatus));
 
@@ -67,6 +70,22 @@ export default function Orders() {
   const handleTabClick = (tab) => {
     navigate(`/orders/${tab.toLowerCase().replace(" ", "-")}`);
     setPage(1);
+  };
+
+  const handleStatusChange = async (orderId, status) => {
+    const previousOrders = orders;
+    setOrders((current) => current.map((order) => (order.id === orderId ? { ...order, status } : order)));
+
+    try {
+      await apiPatch(`/admin/orders/${orderId}/status`, { status });
+    } catch (err) {
+      setOrders(previousOrders);
+      setError(err.message);
+    }
+  };
+
+  const handleOrderItemSelect = (orderId, orderItemId) => {
+    setSelectedOrderItems((current) => ({ ...current, [orderId]: orderItemId }));
   };
 
   return (
@@ -132,7 +151,15 @@ export default function Orders() {
             </tr>
           </thead>
           <tbody>
-            {paginated.map((order) => (
+            {paginated.map((order) => {
+              const selectedItem =
+                order.items?.find((item) => item.orderItemId === selectedOrderItems[order.id]) ||
+                order.items?.[0];
+              const displayName = selectedItem?.name ?? order.name;
+              const displayColor = selectedItem?.color ?? order.color;
+              const displayImage = selectedItem?.imageUrl ?? order.imageUrl;
+
+              return (
               <tr key={order.id} className={selected.includes(order.id) ? "row-selected" : ""}>
                 <td>
                   <input
@@ -142,11 +169,24 @@ export default function Orders() {
                   />
                 </td>
                 <td>
-                  <div className="product-cell">
-                    <div className="product-thumb">{order.imageUrl ? <img src={order.imageUrl} alt="" /> : "SW"}</div>
+                  <div className="orders-cell">
+                    <div className="orders-thumb">{displayImage ? <img src={imageUrl(displayImage)} alt="" /> : "SW"}</div>
                     <div>
-                      <p className="product-id">{order.id}</p>
-                      <p className="product-name">{order.name} ({order.color})</p>
+                      <p className="orders-id">{order.id}</p>
+                      <p className="orders-name">{displayName} ({displayColor})</p>
+                      {order.items?.length > 1 && (
+                        <select
+                          className="order-item-select"
+                          value={selectedItem?.orderItemId ?? ""}
+                          onChange={(event) => handleOrderItemSelect(order.id, event.target.value)}
+                        >
+                          {order.items.map((item) => (
+                            <option key={item.orderItemId} value={item.orderItemId}>
+                              {item.name} - {item.size} - Qty {item.quantity}
+                            </option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                   </div>
                 </td>
@@ -159,9 +199,15 @@ export default function Orders() {
                   </span>
                 </td>
                 <td>
-                  <span className={`status-badge status-${order.status?.toLowerCase()}`}>
-                    {order.status}
-                  </span>
+                  <select
+                    className={`status-select status-${order.status?.toLowerCase().replaceAll(" ", "-")}`}
+                    value={order.status}
+                    onChange={(event) => handleStatusChange(order.id, event.target.value)}
+                  >
+                    {ORDER_STATUSES.map((status) => (
+                      <option key={status} value={status}>{status}</option>
+                    ))}
+                  </select>
                 </td>
                 <td>
                   <div className="action-btns">
@@ -171,7 +217,8 @@ export default function Orders() {
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
             {paginated.length === 0 && (
               <tr>
                 <td colSpan="8" className="empty-row">No orders found.</td>

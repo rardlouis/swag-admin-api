@@ -1,5 +1,6 @@
 import { createContext, useContext, useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost } from "../api.js";
+import { apiDelete, apiGet, apiPatch, apiPost } from "../api.js";
+import { containsProfanity, PROFANITY_ERROR } from "../profanity.js";
 
 const ChatContext = createContext(null);
 
@@ -146,6 +147,11 @@ export function ChatProvider({ children }) {
   };
 
   const sendMessage = async (text, convId = activeId) => {
+    if (containsProfanity(text)) {
+      setError(PROFANITY_ERROR);
+      return false;
+    }
+
     const optimisticMessage = {
       id: `local-${Date.now()}`,
       from: "admin",
@@ -175,19 +181,59 @@ export function ChatProvider({ children }) {
       }
     } catch (err) {
       setError(err.message || "Unable to send message");
+      return false;
     }
+
+    return true;
   };
 
-  const toggleMode = (convId = activeId) => {
+  const toggleMode = async (convId = activeId) => {
+    const conversation = conversations.find((item) => item.id === convId);
+    if (!conversation) return false;
+
+    const nextMode = conversation.mode === "ai" ? "human" : "ai";
+
     setConversations((prev) =>
       prev.map((c) =>
-        c.id !== convId ? c : { ...c, mode: c.mode === "ai" ? "human" : "ai" }
+        c.id !== convId ? c : { ...c, mode: nextMode, type: nextMode, isAi: nextMode === "ai" }
       )
     );
+
+    try {
+      const data = await apiPatch(`/admin/chats/${convId}/mode`, { mode: nextMode });
+
+      if (Array.isArray(data)) {
+        setConversations(data);
+      }
+    } catch (err) {
+      setError(err.message || "Unable to update chat mode");
+      loadConversations(true);
+      return false;
+    }
+
+    return true;
+  };
+
+  const deleteChat = async (convId = activeId) => {
+    if (!convId) return false;
+
+    const nextConversations = conversations.filter((conversation) => conversation.id !== convId);
+    setConversations(nextConversations);
+    setActiveId((current) => (current === convId ? nextConversations[0]?.id ?? null : current));
+
+    try {
+      await apiDelete(`/admin/chats/${convId}`);
+    } catch (err) {
+      setError(err.message || "Unable to delete chat");
+      loadConversations(true);
+      return false;
+    }
+
+    return true;
   };
 
   return (
-    <ChatContext.Provider value={{ conversations, activeId, setActiveId: selectConversation, activeConv, sendMessage, toggleMode, floatingOpen, setFloatingOpen, filter, setFilter, loading, error, refreshChats: loadConversations }}>
+    <ChatContext.Provider value={{ conversations, activeId, setActiveId: selectConversation, activeConv, sendMessage, toggleMode, deleteChat, floatingOpen, setFloatingOpen, filter, setFilter, loading, error, refreshChats: loadConversations }}>
       {children}
     </ChatContext.Provider>
   );

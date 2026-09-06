@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from "react";
 import { useChatContext } from "../../context/ChatContext.jsx";
-import { MdSearch, MdSend, MdAttachFile, MdSmartToy, MdPerson, MdEdit } from "react-icons/md";
+import { MdSearch, MdSend, MdAttachFile, MdSmartToy, MdPerson, MdEdit, MdDelete } from "react-icons/md";
+import { containsProfanity, PROFANITY_ERROR } from "../../profanity.js";
 import "./Chats.css";
 
 const FILTERS = ["All", "Unread", "AI", "Human", "Ongoing", "Complete"];
 
-function ConvItem({ conv, active, onClick }) {
+function ConvItem({ conv, active, onClick, onDelete }) {
   return (
     <div className={`conv-item ${active ? "conv-item--active" : ""}`} onClick={onClick}>
       <div className="conv-avatar">
@@ -16,19 +17,33 @@ function ConvItem({ conv, active, onClick }) {
       </div>
       <div className="conv-info">
         <p className="conv-id">{conv.product?.name ?? conv.id}</p>
-        <p className="conv-name">{conv.name}</p>
+        <p className="conv-name">
+          {conv.name}
+          {conv.isAi && <span className="conv-ai-label">AI Assistant</span>}
+        </p>
         <p className="conv-last">{conv.lastMsg}</p>
       </div>
       <div className="conv-meta">
         <span className="conv-time">{conv.time}</span>
         {conv.unread > 0 && <span className="conv-badge">{conv.unread}</span>}
+        <button
+          className="conv-delete"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete();
+          }}
+          title="Delete from admin view"
+          type="button"
+        >
+          <MdDelete size={14} />
+        </button>
       </div>
     </div>
   );
 }
 
 export default function Chats() {
-  const { conversations, activeId, setActiveId, activeConv, sendMessage, toggleMode, filter, setFilter, loading, error } = useChatContext();
+  const { conversations, activeId, setActiveId, activeConv, sendMessage, toggleMode, deleteChat, filter, setFilter, loading, error } = useChatContext();
   const [input, setInput]     = useState("");
   const [search, setSearch]   = useState("");
   const bottomRef             = useRef(null);
@@ -39,6 +54,10 @@ export default function Chats() {
 
   const handleSend = () => {
     if (!input.trim()) return;
+    if (containsProfanity(input)) {
+      window.alert(PROFANITY_ERROR);
+      return;
+    }
     sendMessage(input.trim());
     setInput("");
   };
@@ -79,16 +98,21 @@ export default function Chats() {
               <div className="chat-topbar">
                 <div className="chat-topbar-left">
                   <div className="chat-topbar-avatar">{activeConv.name[0]}</div>
-                  <span className="chat-topbar-name">{activeConv.name}</span>
+                  <div>
+                    <span className="chat-topbar-name">{activeConv.name}</span>
+                    <span className="chat-topbar-mode">
+                      {activeConv.mode === "ai" ? "AI Assistant is handling this chat" : "Admin is handling this chat"}
+                    </span>
+                  </div>
                 </div>
                 <div className="chat-topbar-right">
                   <button
                     className={`mode-toggle-btn ${activeConv.mode === "ai" ? "mode-ai" : "mode-human"}`}
                     onClick={() => toggleMode()}
-                    title={activeConv.mode === "ai" ? "Switch to Human" : "Switch to AI"}
+                    title={activeConv.mode === "ai" ? "Take over as admin" : "Switch back to AI Assistant"}
                   >
                     {activeConv.mode === "ai" ? <MdSmartToy size={18} /> : <MdPerson size={18} />}
-                    <span>{activeConv.mode === "ai" ? "AI Mode" : "Human Mode"}</span>
+                    <span>{activeConv.mode === "ai" ? "Take Over" : "Use AI"}</span>
                   </button>
                 </div>
               </div>
@@ -154,7 +178,13 @@ export default function Chats() {
           </div>
           <div className="conv-list">
             {filtered.map((c) => (
-              <ConvItem key={c.id} conv={c} active={c.id === activeId} onClick={() => setActiveId(c.id)} />
+              <ConvItem
+                key={c.id}
+                conv={c}
+                active={c.id === activeId}
+                onClick={() => setActiveId(c.id)}
+                onDelete={() => deleteChat(c.id)}
+              />
             ))}
           </div>
         </div>

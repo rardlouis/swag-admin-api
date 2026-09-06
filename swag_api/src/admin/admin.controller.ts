@@ -28,6 +28,11 @@ export class AdminController {
     return this.adminService.orders();
   }
 
+  @Patch('orders/:id/status')
+  updateOrderStatus(@Param('id') id: string, @Body('status') status: string) {
+    return this.adminService.updateOrderStatus(id, status);
+  }
+
   @Get('reviews')
   reviews() {
     return this.adminService.reviews();
@@ -71,6 +76,16 @@ export class AdminController {
   @Post('chats/:id/read')
   markChatRead(@Param('id') id: string) {
     return this.adminService.markChatRead(id);
+  }
+
+  @Patch('chats/:id/mode')
+  updateChatMode(@Param('id') id: string, @Body('mode') mode: string) {
+    return this.adminService.updateChatMode(id, mode);
+  }
+
+  @Delete('chats/:id')
+  deleteChat(@Param('id') id: string) {
+    return this.adminService.deleteChat(id);
   }
 
   @Get('notifications')

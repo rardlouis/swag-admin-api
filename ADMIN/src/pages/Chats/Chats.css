@@ -55,7 +55,8 @@
   display: flex; align-items: center; justify-content: center;
 }
 
-.chat-topbar-name { color: #fff; font-weight: 600; font-size: 15px; }
+.chat-topbar-name { color: #fff; font-weight: 600; font-size: 15px; display: block; }
+.chat-topbar-mode { color: rgba(255,255,255,0.78); font-size: 11px; display: block; margin-top: 2px; }
 
 .mode-toggle-btn {
   display: flex; align-items: center; gap: 6px;
@@ -275,8 +276,41 @@
 .conv-info { flex: 1; min-width: 0; }
 .conv-id   { font-size: 10px; color: #2563eb; margin: 0 0 1px; font-weight: 500; }
 .conv-name { font-size: 12px; font-weight: 700; color: #1a1a2e; margin: 0 0 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conv-ai-label {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #2563eb;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  vertical-align: 1px;
+}
 .conv-last { font-size: 11px; color: #aaa; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .conv-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
 .conv-time  { font-size: 10px; color: #bbb; }
 .conv-badge { background: #2563eb; color: #fff; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 10px; }
+.conv-delete {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+}
+.conv-item:hover .conv-delete,
+.conv-delete:focus-visible {
+  opacity: 1;
+}
+.conv-delete:hover {
+  background: #fee2e2;
+  color: #dc2626;
+}

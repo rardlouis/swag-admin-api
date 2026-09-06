@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AiOutlineEye, AiOutlineEyeInvisible } from "react-icons/ai";
 import { apiPost } from "../../api.js";
+import { setStoredAdminUser } from "../../session.js";
 import "./Login.css";
 
 export default function Login() {
@@ -23,7 +24,8 @@ export default function Login() {
       const storage = remember ? localStorage : sessionStorage;
 
       storage.setItem("swag_admin_token", session.token);
-      storage.setItem("swag_admin_user", JSON.stringify(session.user));
+      setStoredAdminUser(session.user, storage);
+      window.dispatchEvent(new Event("swag_admin_user_updated"));
       navigate("/dashboard", { replace: true });
     } catch (err) {
       setError(err.message || "Login failed");

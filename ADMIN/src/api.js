@@ -110,3 +110,9 @@ export function formatDate(value, options = {}) {
     ...options,
   }).format(new Date(value));
 }
+
+export function imageUrl(url) {
+  if (!url) return "";
+  if (/^https?:\/\//i.test(url)) return url.replace("http://localhost:5000", API_BASE_URL.replace("/api", ""));
+  return `${API_BASE_URL.replace("/api", "")}${url.startsWith("/") ? url : `/${url}`}`;
+}

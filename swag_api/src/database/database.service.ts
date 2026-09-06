@@ -3,6 +3,9 @@ import * as sql from 'mssql/msnodesqlv8';
 
 @Injectable()
 export class DatabaseService implements OnModuleDestroy, OnModuleInit {
+  // USERS.user_id is a uniqueidentifier, so the public "gemini-bot" id maps to this fixed GUID.
+  private readonly geminiBotUserId = '11111111-1111-4111-8111-111111111111';
+
   private pool: sql.ConnectionPool | null = null;
 
   private readonly driver = process.env.DB_DRIVER ?? 'ODBC Driver 17 for SQL Server';
@@ -22,6 +25,8 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
     await this.ensureUserProfileColumns();
     await this.ensureProductSoftDeleteColumn();
     await this.ensureMessageReadAtColumn();
+    await this.ensureConversationViewColumns();
+    await this.ensureBotUser();
     await this.ensureAdminUser();
   }
 
@@ -101,13 +106,7 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
           BEGIN
             UPDATE USERS
             SET
-              password_hash = CASE
-                WHEN password_hash IS NULL
-                  OR password_hash = ''
-                  OR password_hash = '$2b$10$examplehashhere1234567890'
-                THEN @password
-                ELSE password_hash
-              END,
+              password_hash = @password,
               is_admin = 1,
               is_active = 1
             WHERE email = @email;
@@ -191,6 +190,84 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
         ADD read_at DATETIME2(7) NULL
       `);
     }
+  }
+
+  private async ensureConversationViewColumns() {
+    if (!(await this.tableExists('CONVERSATIONS'))) {
+      return;
+    }
+
+    if (!(await this.columnExists('CONVERSATIONS', 'buyer_deleted_at'))) {
+      await this.query(`
+        ALTER TABLE CONVERSATIONS
+        ADD buyer_deleted_at DATETIME2(7) NULL
+      `);
+    }
+
+    if (!(await this.columnExists('CONVERSATIONS', 'seller_deleted_at'))) {
+      await this.query(`
+        ALTER TABLE CONVERSATIONS
+        ADD seller_deleted_at DATETIME2(7) NULL
+      `);
+    }
+  }
+
+  private async ensureBotUser() {
+    if (!(await this.tableExists('USERS'))) {
+      return;
+    }
+
+    if (!(await this.columnExists('USERS', 'is_bot'))) {
+      await this.query(`
+        ALTER TABLE USERS
+        ADD is_bot BIT NOT NULL CONSTRAINT DF_USERS_IS_BOT DEFAULT ((0))
+      `);
+    }
+
+    await this.request((request) =>
+      request
+        .input('botUserId', sql.UniqueIdentifier, this.geminiBotUserId)
+        .input('email', sql.NVarChar(255), 'gemini-bot@swag.local')
+        .input('password', sql.NVarChar(255), 'not-used')
+        .input('fullName', sql.NVarChar(150), 'AI Assistant').query(`
+          IF EXISTS (SELECT 1 FROM USERS WHERE user_id = @botUserId)
+          BEGIN
+            UPDATE USERS
+            SET
+              email = @email,
+              full_name = @fullName,
+              is_active = 1,
+              is_admin = 0,
+              is_bot = 1
+            WHERE user_id = @botUserId;
+          END
+          ELSE
+          BEGIN
+            INSERT INTO USERS (
+              user_id,
+              email,
+              password_hash,
+              full_name,
+              skin_tone_detected,
+              created_at,
+              is_active,
+              is_admin,
+              is_bot
+            )
+            VALUES (
+              @botUserId,
+              @email,
+              @password,
+              @fullName,
+              0,
+              GETDATE(),
+              1,
+              0,
+              1
+            );
+          END
+        `),
+    );
   }
 
   async onModuleDestroy() {

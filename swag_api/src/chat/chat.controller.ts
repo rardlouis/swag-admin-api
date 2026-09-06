@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { ChatService } from './chat.service';
 
 @Controller('chat')
@@ -15,6 +15,16 @@ export class ChatController {
     return this.chatService.createConversation(userId, productId);
   }
 
+  @Post('conversations/ai')
+  createAiConversation(@Body('userId') userId: string) {
+    return this.chatService.createBotConversation(userId);
+  }
+
+  @Post('ai/conversations')
+  createAiConversationAlias(@Body('userId') userId: string) {
+    return this.chatService.createBotConversation(userId);
+  }
+
   @Post('conversations/:id/messages')
   sendMessage(
     @Param('id') conversationId: string,
@@ -27,5 +37,15 @@ export class ChatController {
   @Post('conversations/:id/read')
   markRead(@Param('id') conversationId: string, @Body('userId') userId: string) {
     return this.chatService.markRead(conversationId, userId);
+  }
+
+  @Delete('conversations/:id/users/:userId')
+  deleteConversation(@Param('id') conversationId: string, @Param('userId') userId: string) {
+    return this.chatService.deleteConversation(conversationId, userId);
+  }
+
+  @Delete('users/:userId/conversations/:id')
+  deleteUserConversation(@Param('id') conversationId: string, @Param('userId') userId: string) {
+    return this.chatService.deleteConversation(conversationId, userId);
   }
 }

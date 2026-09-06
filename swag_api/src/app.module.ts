@@ -10,9 +10,10 @@ import { SavedModule } from './saved/saved.module';
 import { ProfileModule } from './profile/profile.module';
 import { ChatModule } from './chat/chat.module';
 import { TryonModule } from './tryon/tryon.module';
+import { ReviewsModule } from './reviews/reviews.module';
 
 @Module({
-  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule, CartModule, SavedModule, ProfileModule, ChatModule, TryonModule],
+  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule, CartModule, SavedModule, ProfileModule, ChatModule, TryonModule, ReviewsModule],
   controllers: [AppController],
   providers: [AppService],
 })

@@ -9,6 +9,7 @@ import {
   MdUndo,
 } from "react-icons/md";
 import { apiGet, apiPatch, apiUpload } from "../../api.js";
+import { containsProfanity, PROFANITY_ERROR } from "../../profanity.js";
 import "./ProductsForm.css";
 
 const emptyForm = {
@@ -106,6 +107,9 @@ export default function ProductsEdit() {
     }
     if (form.brand.trim().length > 100) {
       return "Brand must be 100 characters or less.";
+    }
+    if (containsProfanity(`${form.name} ${form.description} ${form.brand}`)) {
+      return PROFANITY_ERROR;
     }
 
     return "";

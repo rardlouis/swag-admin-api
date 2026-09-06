@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
+import { assertCleanText } from '../common/profanity';
 import { DatabaseService } from '../database/database.service';
 
 type ChatMessageRow = {
@@ -46,6 +47,8 @@ type SupplierBody = {
 
 @Injectable()
 export class AdminService {
+  private readonly geminiBotUserId = '11111111-1111-4111-8111-111111111111';
+
   constructor(private readonly databaseService: DatabaseService) {}
 
   async dashboard() {
@@ -124,7 +127,19 @@ export class AdminService {
       : '';
     const productColorSelect = hasColorId ? 'cf.label AS color' : 'p.color_name AS color';
 
-    return this.databaseService.query(`
+    const rows = await this.databaseService.query<{
+      id: string;
+      name: string;
+      color: string;
+      price: number;
+      date: Date;
+      customer: string;
+      payment: string;
+      status: string;
+      imageUrl: string | null;
+      itemCount: number;
+      itemsJson: string | null;
+    }>(`
       SELECT
         CONVERT(varchar(36), o.order_id) AS id,
         COALESCE(firstItem.name, 'Order') AS name,
@@ -134,17 +149,30 @@ export class AdminService {
         u.full_name AS customer,
         'Paid' AS payment,
         os.label AS status,
-        firstItem.imageUrl
+        firstItem.imageUrl,
+        ISNULL(orderSummary.itemCount, 0) AS itemCount,
+        orderItems.itemsJson
       FROM ORDERS o
       INNER JOIN USERS u ON u.user_id = o.user_id
       INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
       OUTER APPLY (
+        SELECT COUNT(*) AS itemCount
+        FROM ORDER_ITEMS oi
+        WHERE oi.order_id = o.order_id
+      ) orderSummary
+      OUTER APPLY (
         SELECT TOP 1
+          CONVERT(varchar(36), oi.order_item_id) AS orderItemId,
+          CONVERT(varchar(36), p.product_id) AS productId,
           p.name,
           ${productColorSelect},
-          pi.image_url AS imageUrl
+          pi.image_url AS imageUrl,
+          oi.quantity,
+          CAST(oi.unit_price AS float) AS unitPrice,
+          ss.label AS size
         FROM ORDER_ITEMS oi
         INNER JOIN PRODUCTS p ON p.product_id = oi.product_id
+        INNER JOIN SIZE_STANDARDS ss ON ss.size_id = oi.size_id
         ${productColorJoin}
         OUTER APPLY (
           SELECT TOP 1 image_url
@@ -153,9 +181,173 @@ export class AdminService {
           ORDER BY is_primary DESC, display_order ASC
         ) pi
         WHERE oi.order_id = o.order_id
+        ORDER BY oi.order_item_id
       ) firstItem
+      OUTER APPLY (
+        SELECT (
+          SELECT
+            CONVERT(varchar(36), oi.order_item_id) AS orderItemId,
+            CONVERT(varchar(36), p.product_id) AS productId,
+            p.name,
+            ${productColorSelect},
+            pi.image_url AS imageUrl,
+            oi.quantity,
+            CAST(oi.unit_price AS float) AS unitPrice,
+            CAST(oi.quantity * oi.unit_price AS float) AS lineTotal,
+            ss.label AS size
+          FROM ORDER_ITEMS oi
+          INNER JOIN PRODUCTS p ON p.product_id = oi.product_id
+          INNER JOIN SIZE_STANDARDS ss ON ss.size_id = oi.size_id
+          ${productColorJoin}
+          OUTER APPLY (
+            SELECT TOP 1 image_url
+            FROM PRODUCT_IMAGES
+            WHERE product_id = p.product_id
+            ORDER BY is_primary DESC, display_order ASC
+          ) pi
+          WHERE oi.order_id = o.order_id
+          ORDER BY oi.order_item_id
+          FOR JSON PATH
+        ) AS itemsJson
+      ) orderItems
       ORDER BY o.placed_at DESC
     `);
+
+    return rows.map(({ itemsJson, ...order }) => {
+      const items = itemsJson ? JSON.parse(itemsJson) : [];
+      const firstItem = items[0];
+
+      return {
+        ...order,
+        itemCount: Number(order.itemCount ?? items.length),
+        items,
+        selectedItemId: firstItem?.orderItemId ?? null,
+      };
+    });
+  }
+
+  async updateOrderStatus(orderId: string, status: string) {
+    const nextStatus = status?.trim();
+
+    if (!nextStatus) {
+      throw new BadRequestException('Order status is required');
+    }
+
+    const current = await this.databaseService.request<{ status: string }>((request) =>
+      request.input('orderId', sql.UniqueIdentifier, orderId).query(`
+        SELECT TOP 1 os.label AS status
+        FROM ORDERS o
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE o.order_id = @orderId
+      `),
+    );
+
+    if (!current[0]) {
+      throw new NotFoundException('Order not found');
+    }
+
+    const wasCancelled = current[0].status.toLowerCase().includes('cancel');
+    const willCancel = nextStatus.toLowerCase().includes('cancel');
+
+    await this.databaseService.request((request) =>
+      request.input('status', sql.NVarChar(30), nextStatus).query(`
+        IF NOT EXISTS (SELECT 1 FROM ORDER_STATUSES WHERE label = @status)
+        BEGIN
+          INSERT INTO ORDER_STATUSES (label) VALUES (@status);
+        END
+      `),
+    );
+
+    const updated = await this.databaseService.request<{ id: string }>((request) =>
+      request
+        .input('orderId', sql.UniqueIdentifier, orderId)
+        .input('status', sql.NVarChar(30), nextStatus)
+        .input('wasCancelled', sql.Bit, wasCancelled ? 1 : 0)
+        .input('willCancel', sql.Bit, willCancel ? 1 : 0).query(`
+          SET XACT_ABORT ON;
+          BEGIN TRANSACTION;
+
+          IF @wasCancelled = 0 AND @willCancel = 1
+          BEGIN
+            ;WITH returned AS (
+              SELECT product_id, size_id, SUM(quantity) AS quantity
+              FROM ORDER_ITEMS
+              WHERE order_id = @orderId
+              GROUP BY product_id, size_id
+            )
+            MERGE PRODUCT_SIZE_STOCK AS target
+            USING returned AS source
+            ON target.product_id = source.product_id AND target.size_id = source.size_id
+            WHEN MATCHED THEN
+              UPDATE SET stock_qty = target.stock_qty + source.quantity
+            WHEN NOT MATCHED THEN
+              INSERT (product_id, size_id, stock_qty)
+              VALUES (source.product_id, source.size_id, source.quantity);
+
+            ;WITH returned AS (
+              SELECT product_id, SUM(quantity) AS quantity
+              FROM ORDER_ITEMS
+              WHERE order_id = @orderId
+              GROUP BY product_id
+            )
+            UPDATE p
+            SET stock_qty = p.stock_qty + returned.quantity
+            FROM PRODUCTS p
+            INNER JOIN returned ON returned.product_id = p.product_id;
+          END
+          ELSE IF @wasCancelled = 1 AND @willCancel = 0
+          BEGIN
+            IF EXISTS (
+              SELECT 1
+              FROM ORDER_ITEMS oi
+              LEFT JOIN PRODUCT_SIZE_STOCK pss ON pss.product_id = oi.product_id AND pss.size_id = oi.size_id
+              WHERE oi.order_id = @orderId AND ISNULL(pss.stock_qty, 0) < oi.quantity
+            )
+            BEGIN
+              THROW 51020, 'Cannot reactivate order because stock is no longer available', 1;
+            END
+
+            UPDATE pss
+            SET stock_qty = pss.stock_qty - ordered.quantity
+            FROM PRODUCT_SIZE_STOCK pss
+            INNER JOIN (
+              SELECT product_id, size_id, SUM(quantity) AS quantity
+              FROM ORDER_ITEMS
+              WHERE order_id = @orderId
+              GROUP BY product_id, size_id
+            ) ordered ON ordered.product_id = pss.product_id AND ordered.size_id = pss.size_id;
+
+            UPDATE p
+            SET stock_qty =
+              CASE
+                WHEN p.stock_qty >= ordered.quantity THEN p.stock_qty - ordered.quantity
+                ELSE 0
+              END
+            FROM PRODUCTS p
+            INNER JOIN (
+              SELECT product_id, SUM(quantity) AS quantity
+              FROM ORDER_ITEMS
+              WHERE order_id = @orderId
+              GROUP BY product_id
+            ) ordered ON ordered.product_id = p.product_id;
+          END
+
+          UPDATE ORDERS
+          SET
+            status_id = (SELECT TOP 1 status_id FROM ORDER_STATUSES WHERE label = @status),
+            updated_at = GETDATE()
+          OUTPUT CONVERT(varchar(36), inserted.order_id) AS id
+          WHERE order_id = @orderId;
+
+          COMMIT TRANSACTION;
+        `),
+    );
+
+    if (!updated[0]) {
+      throw new NotFoundException('Order not found');
+    }
+
+    return { id: orderId, status: nextStatus };
   }
 
   async reviews() {
@@ -296,22 +488,30 @@ export class AdminService {
   async chats() {
     const conversations = await this.databaseService.query<{
       id: string;
+      buyerId: string;
+      sellerId: string;
       name: string;
+      sellerName: string;
       lastMsg: string | null;
       time: Date | null;
       unread: number;
       mode: string;
+      isAi: boolean | number;
       productName: string | null;
       productPrice: number | null;
       imageUrl: string | null;
     }>(`
       SELECT
         CONVERT(varchar(36), c.convo_id) AS id,
+        CONVERT(varchar(36), c.buyer_id) AS buyerId,
+        CONVERT(varchar(36), c.seller_id) AS sellerId,
         buyer.full_name AS name,
+        seller.full_name AS sellerName,
         latest.body AS lastMsg,
         COALESCE(latest.sent_at, c.last_message_at) AS time,
         COUNT(CASE WHEN m.is_read = 0 AND m.sender_id = c.buyer_id THEN 1 END) AS unread,
-        CASE WHEN seller.is_admin = 1 THEN 'ai' ELSE 'human' END AS mode,
+        CASE WHEN seller.is_bot = 1 THEN 'ai' ELSE 'human' END AS mode,
+        seller.is_bot AS isAi,
         p.name AS productName,
         CAST(p.price AS float) AS productPrice,
         pi.image_url AS imageUrl
@@ -332,8 +532,8 @@ export class AdminService {
         ORDER BY is_primary DESC, display_order ASC
       ) pi
       LEFT JOIN MESSAGES m ON m.convo_id = c.convo_id
-      WHERE c.is_active = 1
-      GROUP BY c.convo_id, buyer.full_name, seller.is_admin, p.name, p.price, pi.image_url, latest.body, latest.sent_at, c.last_message_at
+      WHERE c.is_active = 1 AND c.seller_deleted_at IS NULL
+      GROUP BY c.convo_id, c.buyer_id, c.seller_id, buyer.full_name, seller.full_name, seller.is_bot, p.name, p.price, pi.image_url, latest.body, latest.sent_at, c.last_message_at
       ORDER BY COALESCE(latest.sent_at, c.last_message_at) DESC
     `);
 
@@ -342,6 +542,7 @@ export class AdminService {
         CONVERT(varchar(36), m.message_id) AS id,
         CONVERT(varchar(36), m.convo_id) AS convoId,
         CASE
+          WHEN sender.is_bot = 1 THEN 'ai'
           WHEN sender.is_admin = 1 AND sender.user_id = c.seller_id THEN 'admin'
           WHEN sender.user_id = c.seller_id THEN 'ai'
           ELSE 'customer'
@@ -353,7 +554,7 @@ export class AdminService {
       FROM MESSAGES m
       INNER JOIN CONVERSATIONS c ON c.convo_id = m.convo_id
       INNER JOIN USERS sender ON sender.user_id = m.sender_id
-      WHERE c.is_active = 1
+      WHERE c.is_active = 1 AND c.seller_deleted_at IS NULL
       ORDER BY m.sent_at ASC
     `);
 
@@ -369,11 +570,16 @@ export class AdminService {
 
       return {
         id: conversation.id,
+        buyerId: conversation.buyerId,
+        sellerId: conversation.sellerId,
         name: conversation.name,
+        sellerName: conversation.sellerName,
         lastMsg: lastMessage ? `${this.senderLabel(lastMessage.from)}: ${lastMessage.text}` : 'No messages yet',
         time: this.relativeTime(conversation.time),
         unread: Number(conversation.unread ?? 0),
         mode: conversation.mode,
+        type: conversation.isAi ? 'ai' : 'human',
+        isAi: Boolean(conversation.isAi),
         messages: convoMessages.map((message) => ({
           id: message.id,
           from: message.from,
@@ -402,11 +608,16 @@ export class AdminService {
       throw new BadRequestException('Message text is required');
     }
 
-    const conversation = await this.databaseService.request<{ sellerId: string }>((request) =>
-      request.input('conversationId', conversationId).query(`
-        SELECT CONVERT(varchar(36), seller_id) AS sellerId
-        FROM CONVERSATIONS
-        WHERE convo_id = @conversationId AND is_active = 1
+    assertCleanText(trimmedText, 'Message');
+
+    const conversation = await this.databaseService.request<{ sellerId: string; isBot: boolean | number }>((request) =>
+      request.input('conversationId', sql.UniqueIdentifier, conversationId).query(`
+        SELECT
+          CONVERT(varchar(36), c.seller_id) AS sellerId,
+          seller.is_bot AS isBot
+        FROM CONVERSATIONS c
+        INNER JOIN USERS seller ON seller.user_id = c.seller_id
+        WHERE c.convo_id = @conversationId AND c.is_active = 1
       `),
     );
 
@@ -414,17 +625,23 @@ export class AdminService {
       throw new NotFoundException('Conversation not found');
     }
 
+    const senderId = await this.adminUserId();
+    const shouldTakeOver = Boolean(conversation[0].isBot);
+
     await this.databaseService.request((request) =>
       request
-        .input('conversationId', conversationId)
-        .input('senderId', conversation[0].sellerId)
-        .input('body', trimmedText)
+        .input('conversationId', sql.UniqueIdentifier, conversationId)
+        .input('senderId', sql.UniqueIdentifier, senderId)
+        .input('body', sql.NVarChar(sql.MAX), trimmedText)
         .query(`
           INSERT INTO MESSAGES (convo_id, sender_id, body, is_read)
           VALUES (@conversationId, @senderId, @body, 0)
 
           UPDATE CONVERSATIONS
-          SET last_message_at = GETDATE()
+          SET last_message_at = GETDATE(),
+              ${shouldTakeOver ? 'seller_id = @senderId,' : ''}
+              buyer_deleted_at = NULL,
+              seller_deleted_at = NULL
           WHERE convo_id = @conversationId
         `),
     );
@@ -458,6 +675,48 @@ export class AdminService {
     );
 
     return this.chats();
+  }
+
+  async updateChatMode(conversationId: string, mode: string) {
+    const nextMode = mode === 'ai' ? 'ai' : 'human';
+    const sellerId = nextMode === 'ai' ? this.geminiBotUserId : await this.adminUserId();
+
+    const updated = await this.databaseService.request<{ id: string }>((request) =>
+      request
+        .input('conversationId', sql.UniqueIdentifier, conversationId)
+        .input('sellerId', sql.UniqueIdentifier, sellerId)
+        .query(`
+          UPDATE CONVERSATIONS
+          SET seller_id = @sellerId,
+              seller_deleted_at = NULL,
+              last_message_at = COALESCE(last_message_at, GETDATE())
+          OUTPUT CONVERT(varchar(36), inserted.convo_id) AS id
+          WHERE convo_id = @conversationId AND is_active = 1
+        `),
+    );
+
+    if (!updated[0]) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    return this.chats();
+  }
+
+  async deleteChat(conversationId: string) {
+    const deleted = await this.databaseService.request<{ id: string }>((request) =>
+      request.input('conversationId', sql.UniqueIdentifier, conversationId).query(`
+        UPDATE CONVERSATIONS
+        SET seller_deleted_at = GETDATE()
+        OUTPUT CONVERT(varchar(36), inserted.convo_id) AS id
+        WHERE convo_id = @conversationId AND is_active = 1
+      `),
+    );
+
+    if (!deleted[0]) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    return { deleted: true, id: conversationId };
   }
 
   async notifications() {
@@ -672,6 +931,21 @@ export class AdminService {
     return `₱${Number(value ?? 0).toLocaleString('en-PH', {
       maximumFractionDigits: 0,
     })}`;
+  }
+
+  private async adminUserId() {
+    const admins = await this.databaseService.query<{ id: string }>(`
+      SELECT TOP 1 CONVERT(varchar(36), user_id) AS id
+      FROM USERS
+      WHERE is_admin = 1 AND is_active = 1
+      ORDER BY created_at ASC
+    `);
+
+    if (!admins[0]) {
+      throw new NotFoundException('Admin support user not found');
+    }
+
+    return admins[0].id;
   }
 
   private async ensureSuppliersTable() {

@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
+import { assertCleanText } from '../common/profanity';
 import { DatabaseService } from '../database/database.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
@@ -270,7 +271,7 @@ export class ProductsService {
         p.name,
         p.description,
         CAST(p.price AS float) AS price,
-        p.stock_qty AS qty,
+        CAST(CASE WHEN sizeStock.totalQty IS NOT NULL THEN sizeStock.totalQty ELSE p.stock_qty END AS int) AS qty,
         p.brand,
         ${color.select},
         ${deletedSelect}
@@ -301,6 +302,11 @@ export class ProductsService {
         WHERE pi.product_id = p.product_id
       ) images
       OUTER APPLY (
+        SELECT SUM(CASE WHEN pss.stock_qty > 0 THEN pss.stock_qty ELSE 0 END) AS totalQty
+        FROM PRODUCT_SIZE_STOCK pss
+        WHERE pss.product_id = p.product_id
+      ) sizeStock
+      OUTER APPLY (
         SELECT STRING_AGG(ss.label, ', ') WITHIN GROUP (ORDER BY ss.sort_order) AS sizes
         FROM PRODUCT_SIZE_STOCK pss
         INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pss.size_id
@@ -324,7 +330,7 @@ export class ProductsService {
           p.name,
           p.description,
           CAST(p.price AS float) AS price,
-          p.stock_qty AS qty,
+          CAST(CASE WHEN sizeStock.totalQty IS NOT NULL THEN sizeStock.totalQty ELSE p.stock_qty END AS int) AS qty,
           p.brand,
           ${color.select},
           ${deletedSelect}
@@ -358,6 +364,11 @@ export class ProductsService {
           INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pss.size_id
           WHERE pss.product_id = p.product_id AND pss.stock_qty > 0
         ) sizes
+        OUTER APPLY (
+          SELECT SUM(CASE WHEN pss.stock_qty > 0 THEN pss.stock_qty ELSE 0 END) AS totalQty
+          FROM PRODUCT_SIZE_STOCK pss
+          WHERE pss.product_id = p.product_id
+        ) sizeStock
         OUTER APPLY (
           SELECT TOP 1 image_url
           FROM PRODUCT_IMAGES pi
@@ -529,9 +540,14 @@ export class ProductsService {
       throw new BadRequestException('Product name must be 2 to 120 characters');
     }
 
+    assertCleanText(productDto.name, 'Product name');
+
     if (productDto.description && productDto.description.trim().length > 100) {
       throw new BadRequestException('Description must be 100 characters or less');
     }
+
+    assertCleanText(productDto.description, 'Description');
+    assertCleanText(productDto.brand, 'Brand');
 
     if (productDto.price === undefined || Number(productDto.price) <= 0) {
       throw new BadRequestException('Price must be greater than zero');
