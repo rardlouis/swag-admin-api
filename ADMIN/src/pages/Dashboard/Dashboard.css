@@ -206,7 +206,10 @@
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+  flex-wrap: wrap;
 }
+
+.map-legend-item { display: inline-flex; align-items: center; gap: 4px; }
 
 .map-dot {
   display: inline-block;

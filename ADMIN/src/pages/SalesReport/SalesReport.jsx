@@ -17,64 +17,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { useEffect, useState } from "react";
+import { apiGet } from "../../api.js";
 import "./SalesReport.css";
-
-const salesTrend = [
-  { month: "Jan", sales: 6200, previous: 4200 },
-  { month: "Feb", sales: 9200, previous: 5700 },
-  { month: "Mar", sales: 7800, previous: 5000 },
-  { month: "Apr", sales: 8700, previous: 6500 },
-  { month: "May", sales: 10100, previous: 5900 },
-  { month: "Jun", sales: 7600, previous: 7200 },
-  { month: "Jul", sales: 9800, previous: 6100 },
-  { month: "Aug", sales: 12100, previous: 7600 },
-  { month: "Sep", sales: 9400, previous: 5400 },
-  { month: "Oct", sales: 11200, previous: 8800 },
-  { month: "Nov", sales: 12900, previous: 6900 },
-  { month: "Dec", sales: 15000, previous: 9100 },
-];
-
-const transactionTrend = [
-  { month: "Jan", transactions: 24 },
-  { month: "Feb", transactions: 32 },
-  { month: "Mar", transactions: 38 },
-  { month: "Apr", transactions: 44 },
-  { month: "May", transactions: 49 },
-  { month: "Jun", transactions: 56 },
-  { month: "Jul", transactions: 65 },
-  { month: "Aug", transactions: 52 },
-  { month: "Sep", transactions: 71 },
-  { month: "Oct", transactions: 82 },
-  { month: "Nov", transactions: 82 },
-  { month: "Dec", transactions: 96 },
-];
-
-const productTrend = [
-  { month: "Jan", products: 1400 },
-  { month: "Feb", products: 1510 },
-  { month: "Mar", products: 1640 },
-  { month: "Apr", products: 1780 },
-  { month: "May", products: 1720 },
-  { month: "Jun", products: 1680 },
-  { month: "Jul", products: 1750 },
-  { month: "Aug", products: 1810 },
-  { month: "Sep", products: 1980 },
-  { month: "Oct", products: 2170 },
-  { month: "Nov", products: 2500 },
-];
-
-const recentTransactions = [
-  { id: "AFD23456432", client: "Kenneth", product: "Vintage Jacket", amount: 200, status: "pending" },
-  { id: "AFD23344534", client: "Yuri", product: "H&M Top", amount: 300, status: "shipped" },
-  { id: "AFD23453121", client: "Gerard", product: "Uniqlo Pants", amount: 500, status: "delivered" },
-  { id: "AFD21342314", client: "Leslie", product: "Zara Dress", amount: 850, status: "confirmed" },
-];
-
-const topProducts = [
-  { name: "Vintage Jacket", sold: 86, revenue: 32680 },
-  { name: "Adidas Jacket", sold: 42, revenue: 25200 },
-  { name: "Zara Dress", sold: 31, revenue: 26350 },
-];
 
 const money = new Intl.NumberFormat("en-PH", {
   style: "currency",
@@ -100,6 +45,25 @@ function MetricCard({ title, value, icon, accent, children }) {
 }
 
 export default function SalesReport() {
+  const [report, setReport] = useState({
+    summary: {}, monthlySales: [], monthlyTransactions: [], recentTransactions: [], topProducts: [],
+  });
+
+  useEffect(() => {
+    apiGet("/admin/sales-report")
+      .then((payload) => setReport({
+        summary: payload.summary ?? {},
+        monthlySales: Array.isArray(payload.monthlySales) ? payload.monthlySales : [],
+        monthlyTransactions: Array.isArray(payload.monthlyTransactions) ? payload.monthlyTransactions : [],
+        recentTransactions: Array.isArray(payload.recentTransactions) ? payload.recentTransactions : [],
+        topProducts: Array.isArray(payload.topProducts) ? payload.topProducts : [],
+      }))
+      .catch(() => setReport({ summary: {}, monthlySales: [], monthlyTransactions: [], recentTransactions: [], topProducts: [] }));
+  }, []);
+
+  const { summary, monthlySales, monthlyTransactions, recentTransactions, topProducts } = report;
+  const productTrend = monthlySales.map((item) => ({ ...item, products: Number(summary.totalProducts ?? 0) }));
+
   return (
     <div className="sales-report-page">
       <button className="sales-back" type="button">
@@ -122,12 +86,12 @@ export default function SalesReport() {
       <div className="sales-grid">
         <MetricCard
           title="Total Sales"
-          value={money.format(86400)}
+          value={money.format(Number(summary.totalSales ?? 0))}
           accent="#16a34a"
           icon={<MdTrendingUp size={22} />}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={salesTrend}>
+            <AreaChart data={monthlySales}>
               <Area type="monotone" dataKey="sales" stroke="#16a34a" fill="#dcfce7" strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
@@ -135,12 +99,12 @@ export default function SalesReport() {
 
         <MetricCard
           title="Total Customers"
-          value="327"
+          value={Number(summary.totalCustomers ?? 0).toLocaleString()}
           accent="#2563eb"
           icon={<MdPeople size={22} />}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={salesTrend}>
+            <LineChart data={monthlySales}>
               <Line type="monotone" dataKey="previous" stroke="#2563eb" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
@@ -148,12 +112,12 @@ export default function SalesReport() {
 
         <MetricCard
           title="Total Transactions"
-          value="432"
+          value={Number(summary.totalTransactions ?? 0).toLocaleString()}
           accent="#8b5cf6"
           icon={<MdReceiptLong size={22} />}
         >
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={transactionTrend}>
+            <AreaChart data={monthlyTransactions}>
               <Area type="monotone" dataKey="transactions" stroke="#8b5cf6" fill="#ede9fe" strokeWidth={2} />
             </AreaChart>
           </ResponsiveContainer>
@@ -161,7 +125,7 @@ export default function SalesReport() {
 
         <MetricCard
           title="Total Products"
-          value="2,500"
+          value={Number(summary.totalProducts ?? 0).toLocaleString()}
           accent="#f59e0b"
           icon={<MdInventory2 size={22} />}
         >
@@ -178,7 +142,7 @@ export default function SalesReport() {
             <span>ORDERS.total_amount</span>
           </div>
           <ResponsiveContainer width="100%" height={230}>
-            <LineChart data={salesTrend} margin={{ top: 10, right: 8, left: -24, bottom: 0 }}>
+            <LineChart data={monthlySales} margin={{ top: 10, right: 8, left: -24, bottom: 0 }}>
               <CartesianGrid stroke="#f1f5f9" vertical={false} />
               <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#9ca3af" }} />
               <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#9ca3af" }} />

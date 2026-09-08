@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
+import { createHash, randomInt, randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 
 type LoginBody = {
@@ -29,11 +30,61 @@ type AppRegisterBody = {
   body_waist_cm?: number | string | null;
   body_hip_cm?: number | string | null;
   body_height_cm?: number | string | null;
+  email_verification_id?: string;
 };
 
 @Injectable()
 export class AuthService {
   constructor(private readonly databaseService: DatabaseService) {}
+
+  async sendEmailOtp(rawEmail: string) {
+    const email = this.normalizedEmail(rawEmail);
+    await this.ensureEmailOtpsTable();
+    if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) throw new BadRequestException('Email verification is not configured.');
+    const latest = await this.databaseService.request<{ secondsSinceCreation: number }>((request) => request.input('email', sql.NVarChar(255), email).query(`SELECT TOP 1 DATEDIFF(SECOND, created_at, GETDATE()) AS secondsSinceCreation FROM EMAIL_OTPS WHERE email = @email ORDER BY created_at DESC`));
+    // Keep both values on SQL Server's clock. Parsing DATETIME values in Node
+    // can shift them by the local time-zone and turn a 60-second cooldown into hours.
+    const secondsUntilResend = latest[0]
+      ? Math.max(0, 60 - Math.max(0, Number(latest[0].secondsSinceCreation ?? 0)))
+      : 0;
+    if (latest[0] && secondsUntilResend > 0) throw new BadRequestException(`Please wait ${secondsUntilResend} seconds before requesting another code.`);
+    const verificationId = randomUUID();
+    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    const expiresAt = new Date(Date.now() + 5 * 60_000);
+    await this.databaseService.request((request) => request.input('email', sql.NVarChar(255), email).input('id', sql.UniqueIdentifier, verificationId).input('hash', sql.NVarChar(128), this.otpHash(email, code)).input('expiresAt', sql.DateTime2, expiresAt).query(`UPDATE EMAIL_OTPS SET invalidated_at = GETDATE() WHERE email = @email AND verified_at IS NULL AND invalidated_at IS NULL; INSERT INTO EMAIL_OTPS (verification_id, email, code_hash, expires_at, attempts) VALUES (@id, @email, @hash, @expiresAt, 0);`));
+    try {
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', headers: { 'api-key': process.env.BREVO_API_KEY, 'content-type': 'application/json' }, body: JSON.stringify({ sender: { email: process.env.BREVO_SENDER_EMAIL, name: process.env.BREVO_SENDER_NAME || "A'FRO" }, to: [{ email }], subject: "Your A'FRO verification code", htmlContent: `<p>Your A'FRO verification code is:</p><h2>${code}</h2><p>This code expires in 5 minutes. Do not share it with anyone.</p>` }) });
+      if (!response.ok) throw new Error('Brevo request failed');
+    } catch {
+      await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, verificationId).query('UPDATE EMAIL_OTPS SET invalidated_at = GETDATE() WHERE verification_id = @id'));
+      throw new BadRequestException('We could not send a verification email right now. Please try again.');
+    }
+    return { expiresAt: expiresAt.toISOString(), resendAfterSeconds: 60 };
+  }
+
+  async verifyEmailOtp(rawEmail: string | undefined, rawCode: string | undefined) {
+    const email = this.normalizedEmail(rawEmail ?? ''); const code = rawCode?.trim() ?? '';
+    if (!/^\d{6}$/.test(code)) throw new BadRequestException('Enter the complete 6-digit code.');
+    await this.ensureEmailOtpsTable();
+    const rows = await this.databaseService.request<{ id: string; codeHash: string; expiresAt: Date; attempts: number }>((request) => request.input('email', sql.NVarChar(255), email).query(`SELECT TOP 1 CONVERT(varchar(36), verification_id) AS id, code_hash AS codeHash, expires_at AS expiresAt, attempts FROM EMAIL_OTPS WHERE email = @email AND verified_at IS NULL AND invalidated_at IS NULL ORDER BY created_at DESC`));
+    const otp = rows[0];
+    if (!otp || new Date(otp.expiresAt).getTime() < Date.now()) throw new BadRequestException('This code has expired. Request a new one.');
+    if (Number(otp.attempts) >= 5) throw new BadRequestException('Too many incorrect attempts. Request a new code.');
+    if (this.otpHash(email, code) !== otp.codeHash) { await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, otp.id).query('UPDATE EMAIL_OTPS SET attempts = attempts + 1 WHERE verification_id = @id')); throw new BadRequestException('That code is not correct. Please try again.'); }
+    await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, otp.id).query('UPDATE EMAIL_OTPS SET verified_at = GETDATE() WHERE verification_id = @id'));
+    return { verificationId: otp.id, email };
+  }
+
+  async addressAutocomplete(text: string) {
+    const query = text?.trim() ?? ''; if (query.length < 3) return { suggestions: [] };
+    if (!process.env.GEOAPIFY_API_KEY) throw new BadRequestException('Address search is not configured.');
+    try {
+      const response = await fetch(`https://api.geoapify.com/v1/geocode/autocomplete?text=${encodeURIComponent(query)}&filter=countrycode:ph&bias=proximity:121.0,14.6&limit=5&format=json&apiKey=${encodeURIComponent(process.env.GEOAPIFY_API_KEY)}`);
+      if (!response.ok) throw new Error('Geoapify request failed');
+      const payload = await response.json() as { results?: Array<Record<string, unknown>> };
+      return { suggestions: (payload.results ?? []).map((item) => ({ label: item.formatted ?? '', houseNo: item.housenumber ?? '', street: item.street ?? item.address_line1 ?? '', barangay: item.suburb ?? item.district ?? '', city: item.city ?? item.county ?? '', province: item.state ?? '', zip: item.postcode ?? '', country: item.country ?? 'Philippines', latitude: item.lat ?? null, longitude: item.lon ?? null })) };
+    } catch { throw new BadRequestException('Address suggestions are unavailable right now.'); }
+  }
 
   async login(body: LoginBody) {
     const login = (body.login ?? body.email ?? '').trim();
@@ -186,6 +237,7 @@ export class AuthService {
     if (!email || !password || !fullName) {
       throw new BadRequestException('Email, password, and full name are required');
     }
+    await this.requireVerifiedEmail(email, payload.email_verification_id);
     this.validateAppAccountFields({ email, password, fullName, phone, shippingAddress });
 
     if (!bodyChestCm || !bodyWaistCm || !bodyHipCm) {
@@ -600,6 +652,49 @@ export class AuthService {
 
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  private normalizedEmail(value: string) {
+    const email = value.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      throw new BadRequestException('Enter a valid email address.');
+    }
+    return email;
+  }
+
+  private otpHash(email: string, code: string) {
+    return createHash('sha256').update(`${email}:${code}`).digest('hex');
+  }
+
+  private async ensureEmailOtpsTable() {
+    await this.databaseService.query(`
+      IF OBJECT_ID('dbo.EMAIL_OTPS', 'U') IS NULL
+      BEGIN
+        CREATE TABLE dbo.EMAIL_OTPS (
+          verification_id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+          email NVARCHAR(255) NOT NULL,
+          code_hash NVARCHAR(128) NOT NULL,
+          expires_at DATETIME2 NOT NULL,
+          attempts INT NOT NULL DEFAULT 0,
+          created_at DATETIME2 NOT NULL DEFAULT GETDATE(),
+          verified_at DATETIME2 NULL,
+          invalidated_at DATETIME2 NULL
+        );
+        CREATE INDEX IX_EMAIL_OTPS_EMAIL_CREATED ON dbo.EMAIL_OTPS (email, created_at DESC);
+      END
+    `);
+  }
+
+  private async requireVerifiedEmail(email: string, verificationId?: string) {
+    if (!verificationId) throw new BadRequestException('Verify your email before creating an account.');
+    await this.ensureEmailOtpsTable();
+    const verified = await this.databaseService.request<{ count: number }>((request) =>
+      request.input('email', sql.NVarChar(255), email).input('id', sql.UniqueIdentifier, verificationId).query(`
+        SELECT COUNT(*) AS count FROM EMAIL_OTPS
+        WHERE verification_id = @id AND email = @email AND verified_at IS NOT NULL AND invalidated_at IS NULL
+      `),
+    );
+    if (!Number(verified[0]?.count)) throw new BadRequestException('Verify your email before creating an account.');
   }
 
   private async findStyleId(styleLabel: string | null) {

@@ -221,7 +221,7 @@ export class ChatService {
           SELECT TOP 1 CONVERT(varchar(36), convo_id) AS id
           FROM CONVERSATIONS
           WHERE buyer_id = @userId AND product_id = @productId AND is_active = 1
-          ORDER BY COALESCE(last_message_at, GETDATE()) DESC
+          ORDER BY COALESCE(last_message_at, SYSUTCDATETIME()) DESC
         `),
     );
 
@@ -232,7 +232,7 @@ export class ChatService {
             UPDATE CONVERSATIONS
             SET buyer_deleted_at = NULL,
                 seller_deleted_at = NULL,
-                last_message_at = COALESCE(last_message_at, GETDATE())
+                last_message_at = COALESCE(last_message_at, SYSUTCDATETIME())
             WHERE convo_id = @conversationId
           `),
       );
@@ -247,7 +247,7 @@ export class ChatService {
           .input('productId', sql.UniqueIdentifier, productId).query(`
           INSERT INTO CONVERSATIONS (buyer_id, seller_id, product_id, last_message_at)
           OUTPUT CONVERT(varchar(36), inserted.convo_id) AS id
-          VALUES (@userId, @adminId, @productId, GETDATE())
+          VALUES (@userId, @adminId, @productId, SYSUTCDATETIME())
         `),
     );
 
@@ -256,8 +256,8 @@ export class ChatService {
       request
         .input('conversationId', sql.UniqueIdentifier, conversationId)
         .input('adminId', sql.UniqueIdentifier, adminId).query(`
-          INSERT INTO MESSAGES (convo_id, sender_id, body, is_read)
-          VALUES (@conversationId, @adminId, 'Hi! This is A''FRO Official Support. How can we help with this product?', 0)
+          INSERT INTO MESSAGES (convo_id, sender_id, body, is_read, sent_at)
+          VALUES (@conversationId, @adminId, 'Hi! This is A''FRO Official Support. How can we help with this product?', 0, SYSUTCDATETIME())
         `),
     );
 
@@ -302,11 +302,11 @@ export class ChatService {
         .input('conversationId', sql.UniqueIdentifier, conversationId)
         .input('userId', sql.UniqueIdentifier, userId)
         .input('body', sql.NVarChar(sql.MAX), trimmedText).query(`
-        INSERT INTO MESSAGES (convo_id, sender_id, body, is_read)
-        VALUES (@conversationId, @userId, @body, 0);
+        INSERT INTO MESSAGES (convo_id, sender_id, body, is_read, sent_at)
+        VALUES (@conversationId, @userId, @body, 0, SYSUTCDATETIME());
 
         UPDATE CONVERSATIONS
-        SET last_message_at = GETDATE(),
+        SET last_message_at = SYSUTCDATETIME(),
             buyer_deleted_at = NULL,
             seller_deleted_at = NULL
         WHERE convo_id = @conversationId;
@@ -345,7 +345,7 @@ export class ChatService {
         .query(`
           UPDATE MESSAGES
           SET is_read = 1,
-              read_at = COALESCE(read_at, GETDATE())
+              read_at = COALESCE(read_at, SYSUTCDATETIME())
           WHERE convo_id = @conversationId AND sender_id = @sellerId
         `),
     );
@@ -360,7 +360,7 @@ export class ChatService {
           .input('conversationId', sql.UniqueIdentifier, conversationId)
           .input('userId', sql.UniqueIdentifier, userId).query(`
           UPDATE CONVERSATIONS
-          SET buyer_deleted_at = GETDATE()
+          SET buyer_deleted_at = SYSUTCDATETIME()
           OUTPUT CONVERT(varchar(36), inserted.convo_id) AS id
           WHERE convo_id = @conversationId
             AND buyer_id = @userId
@@ -376,6 +376,10 @@ export class ChatService {
   }
 
   async createBotConversation(userId: string) {
+    // Keep the AI route consistent with normal chat creation: validate the
+    // customer before using their id in a conversation insert.
+    await this.ensureUser(userId);
+
     const existing = await this.databaseService.request<{ id: string }>(
       (request) =>
         request
@@ -388,7 +392,7 @@ export class ChatService {
             AND seller_id = @botUserId
             AND product_id IS NULL
             AND is_active = 1
-          ORDER BY COALESCE(last_message_at, GETDATE()) DESC
+          ORDER BY COALESCE(last_message_at, SYSUTCDATETIME()) DESC
         `),
     );
 
@@ -399,7 +403,7 @@ export class ChatService {
           UPDATE CONVERSATIONS
           SET buyer_deleted_at = NULL,
               seller_deleted_at = NULL,
-              last_message_at = COALESCE(last_message_at, GETDATE())
+                last_message_at = COALESCE(last_message_at, SYSUTCDATETIME())
           WHERE convo_id = @conversationId
         `),
       );
@@ -415,7 +419,7 @@ export class ChatService {
           .query(`
           INSERT INTO CONVERSATIONS (buyer_id, seller_id, product_id, last_message_at)
           OUTPUT CONVERT(varchar(36), inserted.convo_id) AS id
-          VALUES (@userId, @botUserId, NULL, GETDATE())
+          VALUES (@userId, @botUserId, NULL, SYSUTCDATETIME())
         `),
     );
 
@@ -470,7 +474,7 @@ export class ChatService {
           WHERE c.buyer_id = @userId
             AND c.seller_id = @botUserId
             AND m.sender_id = @userId
-            AND m.sent_at >= DATEADD(hour, -1, GETDATE())
+            AND m.sent_at >= DATEADD(hour, -1, SYSUTCDATETIME())
         `),
     );
 
@@ -1075,7 +1079,7 @@ export class ChatService {
         UPDATE CONVERSATIONS
         SET seller_id = @adminId,
             seller_deleted_at = NULL,
-            last_message_at = GETDATE()
+            last_message_at = SYSUTCDATETIME()
         WHERE convo_id = @conversationId
       `),
     );
@@ -1104,11 +1108,11 @@ export class ChatService {
         .input('conversationId', sql.UniqueIdentifier, conversationId)
         .input('botUserId', sql.UniqueIdentifier, this.geminiBotUserId)
         .input('body', sql.NVarChar(sql.MAX), text).query(`
-          INSERT INTO MESSAGES (convo_id, sender_id, body, is_read)
-          VALUES (@conversationId, @botUserId, @body, 0);
+          INSERT INTO MESSAGES (convo_id, sender_id, body, is_read, sent_at)
+          VALUES (@conversationId, @botUserId, @body, 0, SYSUTCDATETIME());
 
           UPDATE CONVERSATIONS
-          SET last_message_at = GETDATE(),
+        SET last_message_at = SYSUTCDATETIME(),
               buyer_deleted_at = NULL,
               seller_deleted_at = NULL
           WHERE convo_id = @conversationId;
@@ -1201,6 +1205,7 @@ export class ChatService {
     return new Intl.DateTimeFormat('en-PH', {
       hour: '2-digit',
       minute: '2-digit',
+      timeZone: 'Asia/Manila',
     }).format(new Date(value));
   }
 

@@ -18,6 +18,11 @@ export class AdminController {
     return this.adminService.dashboard();
   }
 
+  @Get('sales-report')
+  salesReport() {
+    return this.adminService.salesReport();
+  }
+
   @Get('customers')
   customers() {
     return this.adminService.customers();

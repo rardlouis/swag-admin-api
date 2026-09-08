@@ -7,29 +7,16 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { MdArrowOutward, MdArrowUpward, MdArrowDownward } from "react-icons/md";
+import { MdArrowOutward } from "react-icons/md";
 import { apiGet, formatPeso } from "../../api.js";
 import "./Dashboard.css";
-
-const defaultSalesData = [
-  { month: "Jan", avgSale: 180000, avgItem: 120000 },
-  { month: "Feb", avgSale: 200000, avgItem: 150000 },
-  { month: "Mar", avgSale: 250000, avgItem: 190000 },
-  { month: "Apr", avgSale: 211423, avgItem: 160000 },
-  { month: "Jun", avgSale: 290000, avgItem: 210000 },
-  { month: "Jul", avgSale: 339091, avgItem: 260000 },
-  { month: "Aug", avgSale: 310000, avgItem: 240000 },
-  { month: "Sep", avgSale: 280000, avgItem: 200000 },
-  { month: "Oct", avgSale: 320000, avgItem: 230000 },
-  { month: "Nov", avgSale: 350000, avgItem: 270000 },
-  { month: "Dec", avgSale: 400000, avgItem: 300000 },
-];
 
 export default function Dashboard() {
   const [data, setData] = useState({
     summary: {},
-    salesByMonth: defaultSalesData,
+    salesByMonth: [],
     popularStyles: [],
+    customerLocations: [],
   });
 
   useEffect(() => {
@@ -37,14 +24,17 @@ export default function Dashboard() {
       .then((payload) => {
         setData({
           summary: payload.summary ?? {},
-          salesByMonth: payload.salesByMonth?.length ? payload.salesByMonth : defaultSalesData,
+          salesByMonth: Array.isArray(payload.salesByMonth) ? payload.salesByMonth : [],
           popularStyles: payload.popularStyles ?? [],
+          customerLocations: Array.isArray(payload.customerLocations) ? payload.customerLocations : [],
         });
       })
       .catch(() => {});
   }, []);
 
-  const { summary, salesByMonth, popularStyles } = data;
+  const { summary, salesByMonth, popularStyles, customerLocations } = data;
+  const locatedCustomerCount = customerLocations.reduce((total, item) => total + Number(item.customers ?? 0), 0);
+  const mapFocus = customerLocations[0]?.location ? `${customerLocations[0].location}, Philippines` : 'Philippines';
 
   return (
     <div className="dashboard">
@@ -64,7 +54,7 @@ export default function Dashboard() {
           </div>
           <p className="sales-target-value">{formatPeso(summary.totalRevenue)}</p>
           <div className="sales-progress-bar">
-            <div className="sales-progress-fill" style={{ width: "46%" }} />
+            <div className="sales-progress-fill" style={{ width: `${Math.min(100, (Number(summary.totalRevenue ?? 0) / 500000) * 100)}%` }} />
           </div>
         </div>
 
@@ -76,9 +66,7 @@ export default function Dashboard() {
           </div>
           <p className="stat-card-value">{formatPeso(summary.totalRevenue)}</p>
           <div className="stat-card-change">
-            <MdArrowUpward size={13} className="change-up" />
-            <span className="change-up">+11%</span>
-            <span className="stat-card-sub">From last week</span>
+            <span className="stat-card-sub">From recorded orders</span>
           </div>
         </div>
 
@@ -90,9 +78,7 @@ export default function Dashboard() {
           </div>
           <p className="stat-card-value">{Number(summary.totalCustomers ?? 0).toLocaleString()}</p>
           <div className="stat-card-change">
-            <MdArrowUpward size={13} className="change-up" />
-            <span className="change-up">+1.5%</span>
-            <span className="stat-card-sub">From last week</span>
+            <span className="stat-card-sub">Registered customers</span>
           </div>
         </div>
 
@@ -125,9 +111,7 @@ export default function Dashboard() {
           </div>
           <p className="stat-card-value">{Number(summary.totalTransactions ?? 0).toLocaleString()}</p>
           <div className="stat-card-change">
-            <MdArrowUpward size={13} className="change-up" />
-            <span className="change-up">+3.6%</span>
-            <span className="stat-card-sub">From last week</span>
+            <span className="stat-card-sub">Recorded orders</span>
           </div>
         </div>
 
@@ -139,9 +123,7 @@ export default function Dashboard() {
           </div>
           <p className="stat-card-value">{Number(summary.totalProducts ?? 0).toLocaleString()}</p>
           <div className="stat-card-change">
-            <MdArrowDownward size={13} className="change-down" />
-            <span className="change-down">-1.5%</span>
-            <span className="stat-card-sub">From last week</span>
+            <span className="stat-card-sub">Products in catalog</span>
           </div>
         </div>
 
@@ -153,9 +135,7 @@ export default function Dashboard() {
           </div>
           <p className="stat-card-value swag-value">{Number(summary.tryonRequests ?? 0).toLocaleString()}</p>
           <div className="stat-card-change">
-            <MdArrowUpward size={13} className="change-up" />
-            <span className="change-up">+3.4%</span>
-            <span className="stat-card-sub">From last week</span>
+            <span className="stat-card-sub">Recorded try-on sessions</span>
           </div>
         </div>
 
@@ -164,19 +144,22 @@ export default function Dashboard() {
           <div className="chart-card-header">
             <div>
               <p className="card-label">Customer Growth</p>
-              <p className="map-sub">3 Province</p>
+              <p className="map-sub">{locatedCustomerCount} customer{locatedCustomerCount === 1 ? '' : 's'} mapped</p>
             </div>
             <button className="show-all-btn">Show All <MdArrowOutward size={13} /></button>
           </div>
           <div className="map-legend">
-            <span className="map-dot map-dot--green" /> NCR (50%)
-            <span className="map-dot map-dot--blue" /> Bulacan (50%)
-            <span className="map-dot map-dot--yellow" /> Cavite (65%)
+            {customerLocations.length ? customerLocations.map((location, index) => (
+              <span className="map-legend-item" key={location.location}>
+                <i className="map-dot" style={{ backgroundColor: ['#43a047', '#1565c0', '#f9a825', '#8b5cf6'][index] }} />
+                {location.location} ({location.customers})
+              </span>
+            )) : <span>No saved customer addresses yet.</span>}
           </div>
           <div className="map-placeholder">
             <iframe
-              title="Metro Manila Map"
-              src="https://maps.google.com/maps?q=Metro+Manila,Philippines&z=9&output=embed"
+              title="Customer location map"
+              src={`https://maps.google.com/maps?q=${encodeURIComponent(mapFocus)}&z=${customerLocations.length ? 8 : 5}&output=embed`}
               width="100%"
               height="100%"
               style={{ border: "none", borderRadius: 8 }}

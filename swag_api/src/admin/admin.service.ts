@@ -52,7 +52,7 @@ export class AdminService {
   constructor(private readonly databaseService: DatabaseService) {}
 
   async dashboard() {
-    const [summary, salesByMonth, popularStyles] = await Promise.all([
+    const [summary, salesByMonth, popularStyles, customerLocations] = await Promise.all([
       this.databaseService.query(`
         SELECT
           CAST((SELECT ISNULL(SUM(total_amount), 0) FROM ORDERS) AS float) AS totalRevenue,
@@ -83,12 +83,109 @@ export class AdminService {
         GROUP BY fs.style_id, fs.label
         ORDER BY COUNT(sp.pick_id) DESC, fs.label
       `),
+      this.databaseService.query(`
+        SELECT TOP 4
+          COALESCE(NULLIF(LTRIM(RTRIM(a.province)), ''), NULLIF(LTRIM(RTRIM(a.city)), '')) AS location,
+          COUNT(*) AS customers
+        FROM USERS u
+        OUTER APPLY (
+          SELECT TOP 1 city, province FROM USER_ADDRESSES
+          WHERE user_id = u.user_id ORDER BY is_default DESC, created_at DESC
+        ) a
+        WHERE u.is_admin = 0
+          AND COALESCE(NULLIF(LTRIM(RTRIM(a.province)), ''), NULLIF(LTRIM(RTRIM(a.city)), '')) IS NOT NULL
+        GROUP BY COALESCE(NULLIF(LTRIM(RTRIM(a.province)), ''), NULLIF(LTRIM(RTRIM(a.city)), ''))
+        ORDER BY COUNT(*) DESC, location
+      `),
     ]);
 
     return {
       summary: summary[0] ?? {},
       salesByMonth,
       popularStyles,
+      customerLocations,
+    };
+  }
+
+  async salesReport() {
+    const [summary, monthlySales, monthlyTransactions, recentTransactions, topProducts] = await Promise.all([
+      this.databaseService.query(`
+        SELECT
+          CAST(ISNULL(SUM(total_amount), 0) AS float) AS totalSales,
+          (SELECT COUNT(*) FROM USERS WHERE is_admin = 0) AS totalCustomers,
+          COUNT(*) AS totalTransactions,
+          (SELECT COUNT(*) FROM PRODUCTS) AS totalProducts
+        FROM ORDERS
+      `),
+      this.databaseService.query(`
+        WITH months AS (
+          SELECT * FROM (VALUES
+            (1, 'Jan'), (2, 'Feb'), (3, 'Mar'), (4, 'Apr'), (5, 'May'), (6, 'Jun'),
+            (7, 'Jul'), (8, 'Aug'), (9, 'Sep'), (10, 'Oct'), (11, 'Nov'), (12, 'Dec')
+          ) AS m(monthNumber, month)
+        )
+        SELECT
+          m.month,
+          m.monthNumber,
+          CAST(ISNULL(SUM(CASE WHEN YEAR(o.placed_at) = YEAR(GETDATE()) THEN o.total_amount ELSE 0 END), 0) AS float) AS sales,
+          CAST(ISNULL(SUM(CASE WHEN YEAR(o.placed_at) = YEAR(GETDATE()) - 1 THEN o.total_amount ELSE 0 END), 0) AS float) AS previous
+        FROM months m
+        LEFT JOIN ORDERS o ON MONTH(o.placed_at) = m.monthNumber
+          AND YEAR(o.placed_at) IN (YEAR(GETDATE()), YEAR(GETDATE()) - 1)
+        GROUP BY m.month, m.monthNumber
+        ORDER BY m.monthNumber
+      `),
+      this.databaseService.query(`
+        WITH months AS (
+          SELECT * FROM (VALUES
+            (1, 'Jan'), (2, 'Feb'), (3, 'Mar'), (4, 'Apr'), (5, 'May'), (6, 'Jun'),
+            (7, 'Jul'), (8, 'Aug'), (9, 'Sep'), (10, 'Oct'), (11, 'Nov'), (12, 'Dec')
+          ) AS m(monthNumber, month)
+        )
+        SELECT m.month, m.monthNumber, COUNT(o.order_id) AS transactions
+        FROM months m
+        LEFT JOIN ORDERS o ON MONTH(o.placed_at) = m.monthNumber AND YEAR(o.placed_at) = YEAR(GETDATE())
+        GROUP BY m.month, m.monthNumber
+        ORDER BY m.monthNumber
+      `),
+      this.databaseService.query(`
+        SELECT TOP 7
+          CONVERT(varchar(36), o.order_id) AS id,
+          COALESCE(u.full_name, 'Customer') AS client,
+          COALESCE(firstItem.name, 'Order') AS product,
+          CAST(o.total_amount AS float) AS amount,
+          LOWER(REPLACE(os.label, ' ', '-')) AS status,
+          o.placed_at AS placedAt
+        FROM ORDERS o
+        INNER JOIN USERS u ON u.user_id = o.user_id
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        OUTER APPLY (
+          SELECT TOP 1 p.name
+          FROM ORDER_ITEMS oi
+          INNER JOIN PRODUCTS p ON p.product_id = oi.product_id
+          WHERE oi.order_id = o.order_id
+          ORDER BY oi.order_item_id
+        ) firstItem
+        ORDER BY o.placed_at DESC
+      `),
+      this.databaseService.query(`
+        SELECT TOP 5
+          p.name,
+          CAST(SUM(oi.quantity) AS int) AS sold,
+          CAST(SUM(oi.quantity * oi.unit_price) AS float) AS revenue
+        FROM ORDER_ITEMS oi
+        INNER JOIN PRODUCTS p ON p.product_id = oi.product_id
+        GROUP BY p.product_id, p.name
+        ORDER BY SUM(oi.quantity) DESC, SUM(oi.quantity * oi.unit_price) DESC
+      `),
+    ]);
+
+    return {
+      summary: summary[0] ?? { totalSales: 0, totalCustomers: 0, totalTransactions: 0, totalProducts: 0 },
+      monthlySales,
+      monthlyTransactions,
+      recentTransactions,
+      topProducts,
     };
   }
 
