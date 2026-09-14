@@ -2,6 +2,8 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import * as sql from 'mssql/msnodesqlv8';
 import { assertCleanText } from '../common/profanity';
 import { DatabaseService } from '../database/database.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { hashPassword } from '../common/passwords';
 
 type ChatMessageRow = {
   id: string;
@@ -32,6 +34,16 @@ type UpdateProfileBody = {
   confirmPassword?: string;
 };
 
+type CreateAdminBody = {
+  fullName?: string;
+  email?: string;
+  phone?: string;
+  idType?: string;
+  idNumber?: string;
+  password?: string;
+  confirmPassword?: string;
+};
+
 type UploadedProfileFile = {
   filename: string;
 };
@@ -49,7 +61,7 @@ type SupplierBody = {
 export class AdminService {
   private readonly geminiBotUserId = '11111111-1111-4111-8111-111111111111';
 
-  constructor(private readonly databaseService: DatabaseService) {}
+  constructor(private readonly databaseService: DatabaseService, private readonly notificationsService: NotificationsService) {}
 
   async dashboard() {
     const [summary, salesByMonth, popularStyles, customerLocations] = await Promise.all([
@@ -218,6 +230,12 @@ export class AdminService {
   }
 
   async orders() {
+    const [hasReceipt, hasReference, hasTracking, hasTrackingUrl] = await Promise.all([
+      this.databaseService.columnExists('ORDERS', 'payment_receipt_url'),
+      this.databaseService.columnExists('ORDERS', 'payment_reference_number'),
+      this.databaseService.columnExists('ORDERS', 'tracking_number'),
+      this.databaseService.columnExists('ORDERS', 'tracking_url'),
+    ]);
     const hasColorId = await this.databaseService.columnExists('PRODUCTS', 'color_id');
     const productColorJoin = hasColorId
       ? 'LEFT JOIN PRESET_COLORS pc ON pc.color_id = p.color_id LEFT JOIN COLOR_FAMILIES cf ON cf.family_id = pc.family_id'
@@ -236,6 +254,10 @@ export class AdminService {
       imageUrl: string | null;
       itemCount: number;
       itemsJson: string | null;
+      receiptUrl: string | null;
+      paymentReference: string | null;
+      trackingNumber: string | null;
+      trackingUrl: string | null;
     }>(`
       SELECT
         CONVERT(varchar(36), o.order_id) AS id,
@@ -244,8 +266,12 @@ export class AdminService {
         CAST(o.total_amount AS float) AS price,
         o.placed_at AS date,
         u.full_name AS customer,
-        'Paid' AS payment,
+        CASE WHEN LOWER(os.label) = 'payment confirmed' THEN 'Confirmed' ELSE 'Pending verification' END AS payment,
         os.label AS status,
+        ${hasReceipt ? 'o.payment_receipt_url' : 'NULL'} AS receiptUrl,
+        ${hasReference ? 'o.payment_reference_number' : 'NULL'} AS paymentReference,
+        ${hasTracking ? 'o.tracking_number' : 'NULL'} AS trackingNumber,
+        ${hasTrackingUrl ? 'o.tracking_url' : 'NULL'} AS trackingUrl,
         firstItem.imageUrl,
         ISNULL(orderSummary.itemCount, 0) AS itemCount,
         orderItems.itemsJson
@@ -323,16 +349,20 @@ export class AdminService {
     });
   }
 
-  async updateOrderStatus(orderId: string, status: string) {
+  async updateOrderStatus(orderId: string, status: string, trackingNumber?: string, trackingUrl?: string, cancellationReason?: string) {
     const nextStatus = status?.trim();
 
     if (!nextStatus) {
       throw new BadRequestException('Order status is required');
     }
 
-    const current = await this.databaseService.request<{ status: string }>((request) =>
+    await this.ensureOrderTrackingColumns();
+    if (trackingUrl && !/^https?:\/\//i.test(trackingUrl.trim())) {
+      throw new BadRequestException('Tracking link must start with http:// or https://');
+    }
+    const current = await this.databaseService.request<{ status: string; userId: string }>((request) =>
       request.input('orderId', sql.UniqueIdentifier, orderId).query(`
-        SELECT TOP 1 os.label AS status
+        SELECT TOP 1 os.label AS status, CONVERT(varchar(36), o.user_id) AS userId
         FROM ORDERS o
         INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
         WHERE o.order_id = @orderId
@@ -345,6 +375,7 @@ export class AdminService {
 
     const wasCancelled = current[0].status.toLowerCase().includes('cancel');
     const willCancel = nextStatus.toLowerCase().includes('cancel');
+    if (willCancel && !cancellationReason?.trim()) throw new BadRequestException('A cancellation reason is required.');
 
     await this.databaseService.request((request) =>
       request.input('status', sql.NVarChar(30), nextStatus).query(`
@@ -360,7 +391,10 @@ export class AdminService {
         .input('orderId', sql.UniqueIdentifier, orderId)
         .input('status', sql.NVarChar(30), nextStatus)
         .input('wasCancelled', sql.Bit, wasCancelled ? 1 : 0)
-        .input('willCancel', sql.Bit, willCancel ? 1 : 0).query(`
+        .input('willCancel', sql.Bit, willCancel ? 1 : 0)
+        .input('trackingNumber', sql.NVarChar(50), trackingNumber?.trim() || null)
+        .input('trackingUrl', sql.NVarChar(500), trackingUrl?.trim() || null)
+        .input('cancellationReason', sql.NVarChar(500), cancellationReason?.trim() || null).query(`
           SET XACT_ABORT ON;
           BEGIN TRANSACTION;
 
@@ -432,6 +466,9 @@ export class AdminService {
           UPDATE ORDERS
           SET
             status_id = (SELECT TOP 1 status_id FROM ORDER_STATUSES WHERE label = @status),
+            tracking_number = CASE WHEN @trackingNumber IS NULL THEN tracking_number ELSE @trackingNumber END,
+            tracking_url = CASE WHEN @trackingUrl IS NULL THEN tracking_url ELSE @trackingUrl END,
+            cancellation_reason = CASE WHEN @willCancel = 1 THEN @cancellationReason ELSE cancellation_reason END,
             updated_at = GETDATE()
           OUTPUT CONVERT(varchar(36), inserted.order_id) AS id
           WHERE order_id = @orderId;
@@ -444,7 +481,33 @@ export class AdminService {
       throw new NotFoundException('Order not found');
     }
 
+    const notification = this.orderNotification(nextStatus);
+    if (notification) void this.notificationsService.notifyOrder(current[0].userId, { ...notification, orderId, eventKey: `order.status.${nextStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, data: { type: 'order', orderId } }).catch(() => undefined);
+    if (current[0].status.trim().toLowerCase() !== 'payment confirmed' && nextStatus.toLowerCase() === 'payment confirmed') {
+      // This admin-only state transition is the sole trusted payment success
+      // point in the current receipt-based GCash flow.
+      void this.notificationsService.notifyOrderConfirmation(current[0].userId, orderId).catch(() => undefined);
+    }
+    if (willCancel) void this.notificationsService.notifyOrder(current[0].userId, { orderId, eventKey: 'order.status.cancelled', title: 'Order Cancelled', body: `Reason: ${cancellationReason?.trim()}`, data: { type: 'order', orderId } }).catch(() => undefined);
     return { id: orderId, status: nextStatus };
+  }
+
+  private orderNotification(status: string) {
+    const normalized = status.toLowerCase();
+    if (normalized.includes('transit') || normalized.includes('ship')) return { title: 'Order Shipped', body: 'Your order is on its way. Tap to view tracking.' };
+    if (normalized.includes('delivery')) return { title: 'Out for Delivery', body: 'Your order is out for delivery today.' };
+    if (normalized.includes('deliver')) return { title: 'Order Delivered', body: 'Your order has been delivered.' };
+    if (normalized.includes('process')) return { title: 'Order Processing', body: 'Your order is now being prepared.' };
+    if (normalized.includes('confirm')) return { title: 'Payment Confirmed', body: 'Your payment has been confirmed.' };
+    return null;
+  }
+
+  private async ensureOrderTrackingColumns() {
+    for (const [column, definition] of [['tracking_number', 'NVARCHAR(50) NULL'], ['tracking_url', 'NVARCHAR(500) NULL'], ['cancellation_reason', 'NVARCHAR(500) NULL']]) {
+      if (!(await this.databaseService.columnExists('ORDERS', column))) {
+        await this.databaseService.query(`ALTER TABLE ORDERS ADD ${column} ${definition}`);
+      }
+    }
   }
 
   async reviews() {
@@ -817,6 +880,15 @@ export class AdminService {
   }
 
   async notifications() {
+    const items = await this.notificationsService.adminNotifications();
+    return items.map((item: any) => ({ ...item, time: this.relativeTime(item.createdAt) }));
+  }
+
+  async markNotificationRead(notificationId: string) {
+    return this.notificationsService.markAdminNotificationRead(notificationId);
+  }
+
+  async legacyNotifications() {
     const items = await this.databaseService.query<NotificationRow>(`
       SELECT TOP 10 *
       FROM (
@@ -860,6 +932,59 @@ export class AdminService {
       ...item,
       time: this.relativeTime(item.createdAt),
     }));
+  }
+
+  async idTypes() {
+    return this.databaseService.query<{ id: number; label: string }>(`
+      SELECT id_type_id AS id, label
+      FROM ID_TYPES
+      ORDER BY label
+    `);
+  }
+
+  async createAdmin(body: unknown) {
+    const payload = body as CreateAdminBody;
+    const fullName = payload.fullName?.trim() ?? '';
+    const email = payload.email?.trim().toLowerCase() ?? '';
+    const phone = payload.phone?.trim() || null;
+    const password = payload.password ?? '';
+
+    if (fullName.length < 2 || fullName.length > 150) throw new BadRequestException('Enter an administrator name from 2 to 150 characters.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) throw new BadRequestException('Enter a valid administrator email.');
+    if (password.length < 8 || password.length > 64 || !/[A-Z]/.test(password) || !/\d/.test(password)) throw new BadRequestException('Password must be 8 to 64 characters and include an uppercase letter and number.');
+    if (password !== (payload.confirmPassword ?? '')) throw new BadRequestException('Password confirmation does not match.');
+
+    const idType = payload.idType?.trim() || null;
+    const idTypeRows = idType ? await this.databaseService.request<{ idTypeId: number }>((request) =>
+      request.input('idType', sql.NVarChar(100), idType).query('SELECT TOP 1 id_type_id AS idTypeId FROM ID_TYPES WHERE label = @idType'),
+    ) : [];
+    if (idType && !idTypeRows[0]) throw new BadRequestException('Selected ID type does not exist.');
+
+    const duplicate = await this.databaseService.request<{ count: number }>((request) =>
+      request.input('email', sql.NVarChar(255), email).input('phone', sql.NVarChar(30), phone).query(`
+        SELECT COUNT(*) AS count
+        FROM USERS
+        WHERE LOWER(email) = LOWER(@email)
+          OR (@phone IS NOT NULL AND phone = @phone)
+      `),
+    );
+    if (Number(duplicate[0]?.count ?? 0)) throw new BadRequestException('An account with this email or phone already exists.');
+
+    const passwordHash = await hashPassword(password);
+    const created = await this.databaseService.request<{ id: string; email: string; fullName: string; phone: string | null }>((request) =>
+      request
+        .input('email', sql.NVarChar(255), email)
+        .input('passwordHash', sql.NVarChar(255), passwordHash)
+        .input('fullName', sql.NVarChar(150), fullName)
+        .input('phone', sql.NVarChar(30), phone)
+        .input('idTypeId', sql.TinyInt, idTypeRows[0]?.idTypeId ?? null)
+        .input('idNumber', sql.NVarChar(100), payload.idNumber?.trim() || null).query(`
+          INSERT INTO USERS (email, password_hash, full_name, phone, id_type_id, id_number, is_admin, is_active)
+          OUTPUT CONVERT(varchar(36), inserted.user_id) AS id, inserted.email, inserted.full_name AS fullName, inserted.phone
+          VALUES (@email, @passwordHash, @fullName, @phone, @idTypeId, @idNumber, 1, 1)
+        `),
+    );
+    return created[0];
   }
 
   async updateProfile(userId: string, body: unknown) {
@@ -906,6 +1031,7 @@ export class AdminService {
       throw new BadRequestException('Selected ID type does not exist');
     }
 
+    const passwordHash = password ? await hashPassword(password) : null;
     await this.databaseService.request((request) => {
       request
         .input('userId', sql.UniqueIdentifier, userId)
@@ -916,8 +1042,8 @@ export class AdminService {
         .input('idNumber', sql.NVarChar(100), idNumber)
         .input('isActive', sql.Bit, payload.isActive === false ? 0 : 1);
 
-      if (password) {
-        request.input('password', sql.NVarChar(255), password);
+      if (passwordHash) {
+        request.input('passwordHash', sql.NVarChar(255), passwordHash);
       }
 
       return request.query(`
@@ -929,7 +1055,7 @@ export class AdminService {
           id_type_id = @idTypeId,
           id_number = @idNumber,
           is_active = @isActive
-          ${password ? ', password_hash = @password' : ''}
+          ${passwordHash ? ', password_hash = @passwordHash' : ''}
         WHERE user_id = @userId AND is_admin = 1
       `);
     });

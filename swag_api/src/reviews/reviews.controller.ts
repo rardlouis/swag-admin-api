@@ -1,8 +1,9 @@
-import { Body, Controller, Get, Param, Post, Query, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { ReviewsService } from './reviews.service';
+import { SessionAuthGuard, type SessionIdentity } from '../common/session-auth';
 
 type UploadedReviewFile = {
   filename: string;
@@ -50,6 +51,12 @@ export class ReviewsController {
   )
   create(@Body() body: Record<string, string | undefined>, @UploadedFile() file?: UploadedReviewFile) {
     return this.reviewsService.create(body, file);
+  }
+
+  @Delete(':id')
+  @UseGuards(SessionAuthGuard)
+  removeOwn(@Param('id') id: string, @Req() request: { user?: SessionIdentity }) {
+    return this.reviewsService.removeOwn(id, request.user!.sub);
   }
 
   @Post(':id/react')

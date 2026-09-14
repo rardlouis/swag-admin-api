@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, Outlet } from "react-router-dom";
 import Login from "./pages/Login/Login";
 import DashboardLayout from "./pages/Dashboard/DashboardLayout";
 import Dashboard from "./pages/Dashboard/Dashboard";
@@ -20,6 +20,13 @@ import SalesReport from "./pages/SalesReport/SalesReport";
 import Settings from "./pages/Settings/Settings";
 import Help from "./pages/Help/Help";
 
+function RequireAdminSession() {
+  const token =
+    sessionStorage.getItem("swag_admin_token") ||
+    localStorage.getItem("swag_admin_token");
+
+  return token ? <Outlet /> : <Navigate to="/login" replace />;
+}
 
 function App() {
   return (
@@ -28,6 +35,7 @@ function App() {
         <Route path="/" element={<Navigate to="/login" replace />} />
         <Route path="/login" element={<Login />} />
 
+        <Route element={<RequireAdminSession />}>
         <Route element={<DashboardLayout />}>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/products" element={<Navigate to="/products/all" replace />} />
@@ -51,6 +59,7 @@ function App() {
           <Route path="/reviews/reply/:id" element={<ReviewsReply />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/help" element={<Help />} />
+        </Route>
         </Route>
 
       </Routes>

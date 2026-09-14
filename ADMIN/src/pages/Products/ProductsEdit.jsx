@@ -16,6 +16,8 @@ const emptyForm = {
   name: "",
   description: "",
   brand: "",
+  styleId: "",
+  customStyle: "",
   categoryId: "",
   genderId: "",
   sizeId: "",
@@ -26,6 +28,8 @@ const emptyForm = {
   colorHex: "",
   price: "",
   quantity: "1",
+  weightKg: "",
+  bulkUnits: "",
   images: [],
   isActive: true,
 };
@@ -35,6 +39,8 @@ function productToForm(product) {
     name: product?.name ?? "",
     description: product?.description ?? "",
     brand: product?.brand ?? "",
+    styleId: product?.styleId ? String(product.styleId) : "",
+    customStyle: "",
     categoryId: product?.categoryId ? String(product.categoryId) : "",
     genderId: product?.genderId ? String(product.genderId) : "",
     sizeId: product?.sizeId ? String(product.sizeId) : "",
@@ -45,6 +51,8 @@ function productToForm(product) {
     colorHex: product?.colorHex ?? "",
     price: product?.price === undefined ? "" : String(product.price),
     quantity: product?.qty === undefined ? "" : String(product.qty),
+    weightKg: product?.weightKg === null || product?.weightKg === undefined ? "" : String(product.weightKg),
+    bulkUnits: product?.bulkUnits === null || product?.bulkUnits === undefined ? "" : String(product.bulkUnits),
     images: product?.images?.length
       ? product.images.map((image) => ({ imageUrl: image.imageUrl }))
       : product?.imageUrl
@@ -65,6 +73,7 @@ export default function ProductsEdit() {
     garmentTypes: [],
     genders: [],
     colors: [],
+    fashionStyles: [],
   });
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -104,6 +113,12 @@ export default function ProductsEdit() {
     }
     if (!Number.isInteger(quantity) || quantity < 0) {
       return "Quantity must be zero or greater.";
+    }
+    if (form.weightKg !== "" && (!Number.isFinite(Number(form.weightKg)) || Number(form.weightKg) < 0)) {
+      return "Shipping weight must be zero or greater.";
+    }
+    if (form.bulkUnits !== "" && (!Number.isFinite(Number(form.bulkUnits)) || Number(form.bulkUnits) < 0)) {
+      return "Shipping bulk must be zero or greater.";
     }
     if (form.brand.trim().length > 100) {
       return "Brand must be 100 characters or less.";
@@ -198,6 +213,8 @@ export default function ProductsEdit() {
     colorHex: selectedColor?.hex ?? form.colorHex ?? null,
     price: Number(form.price),
     quantity: Number(form.quantity),
+    weightKg: form.weightKg === "" ? null : Number(form.weightKg),
+    bulkUnits: form.bulkUnits === "" ? null : Number(form.bulkUnits),
     imageUrls: form.images.map((image) => image.imageUrl),
     isActive: form.isActive,
   });
@@ -323,7 +340,9 @@ export default function ProductsEdit() {
               <span>Brand</span>
               <input value={form.brand} onChange={(e) => updateField("brand", e.target.value.slice(0, 100))} maxLength={100} />
             </label>
+            <label className="product-add-field product-add-select"><span>Fashion Style</span><select value={form.styleId} onChange={(e) => updateField("styleId", e.target.value)}><option value="">No style assigned</option>{lookups.fashionStyles.map((style) => <option key={style.id} value={style.id}>{style.label}</option>)}</select><MdKeyboardArrowDown size={20} /></label>
           </div>
+          <label className="product-add-field"><span>Custom Fashion Style (optional)</span><input value={form.customStyle} onChange={(e) => updateField("customStyle", e.target.value.slice(0, 100))} placeholder="Creates or reuses this style" maxLength={100} /></label>
 
           <div className="product-add-row">
             <label className="product-add-field product-add-select">
@@ -433,6 +452,32 @@ export default function ProductsEdit() {
                 <option value="0">Inactive</option>
               </select>
               <MdKeyboardArrowDown size={20} />
+            </label>
+          </div>
+
+          <div className="product-add-row">
+            <label className="product-add-field">
+              <span>Shipping Weight (kg)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.001"
+                value={form.weightKg}
+                onChange={(e) => updateField("weightKg", e.target.value)}
+                placeholder="Uses category default if blank"
+              />
+            </label>
+
+            <label className="product-add-field">
+              <span>Shipping Bulk Units</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.bulkUnits}
+                onChange={(e) => updateField("bulkUnits", e.target.value)}
+                placeholder="Uses category default if blank"
+              />
             </label>
           </div>
 

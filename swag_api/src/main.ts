@@ -37,6 +37,7 @@ async function bootstrap() {
   mkdirSync(join(process.cwd(), 'uploads', 'profiles'), { recursive: true });
   mkdirSync(join(process.cwd(), 'uploads', 'receipts'), { recursive: true });
   mkdirSync(join(process.cwd(), 'uploads', 'reviews'), { recursive: true });
+  mkdirSync(join(process.cwd(), 'uploads', 'messages'), { recursive: true });
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   app.enableCors({
     origin: true,

@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
 import { DatabaseService } from '../database/database.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 type AddCartItemBody = {
   userId?: string;
@@ -12,7 +13,7 @@ type AddCartItemBody = {
 type CheckoutBody = {
   userId?: string;
   selectedCartItemIds?: string;
-  shippingFee?: string;
+  addressId?: string;
   paymentMethod?: string;
   referenceNumber?: string;
   recipientName?: string;
@@ -30,9 +31,21 @@ type UploadedReceiptFile = {
   filename: string;
 };
 
+type ShippingEvaluation = {
+  allowed: boolean;
+  code?: 'WEIGHT_EXCEEDED' | 'BULK_EXCEEDED' | 'SHIPPING_DATA_MISSING' | 'SHIPPING_RATE_NOT_FOUND';
+  message?: string;
+  totalWeightKg?: number;
+  totalBulkUnits?: number;
+  packageLabel?: string;
+  shippingFee?: number;
+  destinationProvince?: string;
+  missingShippingProducts?: Array<{ productId: string; productName: string }>;
+};
+
 @Injectable()
 export class CartService {
-  constructor(private readonly databaseService: DatabaseService) {}
+  constructor(private readonly databaseService: DatabaseService, private readonly notificationsService: NotificationsService) {}
 
   async items(userId?: string) {
     if (!userId) {
@@ -202,10 +215,160 @@ export class CartService {
     return { deleted: true, id: cartItemId };
   }
 
+  async evaluateCheckoutShipping(
+    userId?: string,
+    addressId?: string,
+    selectedCartItemIds?: string | string[],
+  ): Promise<ShippingEvaluation> {
+    if (!userId) throw new BadRequestException('User id is required');
+
+    const selectedIds = this.parseSelectedCartItemIds(selectedCartItemIds);
+    const selectedCartItemIdsJson = selectedIds.length ? JSON.stringify(selectedIds) : null;
+    const addressRows = await this.getUserAddress(userId, addressId);
+    const address = addressRows[0];
+    if (!address) {
+      throw this.shippingException('SHIPPING_DATA_MISSING', 'A saved delivery address is required for shipping.');
+    }
+
+    const items = await this.databaseService.request<{
+      cartItemId: string;
+      productId: string;
+      productName: string;
+      quantity: number;
+      resolvedWeightKg: number | null;
+      resolvedBulkUnits: number | null;
+    }>((request) =>
+      request
+        .input('userId', sql.UniqueIdentifier, userId)
+        .input('selectedCartItemIdsJson', sql.NVarChar(sql.MAX), selectedCartItemIdsJson).query(`
+          SELECT
+            CONVERT(varchar(36), ci.cart_item_id) AS cartItemId,
+            CONVERT(varchar(36), p.product_id) AS productId,
+            p.name AS productName,
+            ci.quantity,
+            CAST(COALESCE(p.weight_kg, c.default_weight_kg) AS float) AS resolvedWeightKg,
+            CAST(COALESCE(p.bulk_units, c.default_bulk_units) AS float) AS resolvedBulkUnits
+          FROM CART_ITEMS ci
+          INNER JOIN PRODUCTS p ON p.product_id = ci.product_id
+          INNER JOIN CATEGORIES c ON c.category_id = p.category_id
+          WHERE ci.user_id = @userId
+            AND (
+              @selectedCartItemIdsJson IS NULL
+              OR ci.cart_item_id IN (
+                SELECT TRY_CONVERT(uniqueidentifier, [value])
+                FROM OPENJSON(@selectedCartItemIdsJson)
+                WHERE TRY_CONVERT(uniqueidentifier, [value]) IS NOT NULL
+              )
+            )
+        `),
+    );
+
+    if (!items.length || (selectedIds.length && items.length !== selectedIds.length)) {
+      throw new BadRequestException('One or more cart items were not found.');
+    }
+
+    const missingShippingProducts = items
+      .filter((item) => (
+        item.resolvedWeightKg === null
+        || item.resolvedWeightKg === undefined
+        || item.resolvedBulkUnits === null
+        || item.resolvedBulkUnits === undefined
+        || !Number.isFinite(Number(item.resolvedWeightKg))
+        || !Number.isFinite(Number(item.resolvedBulkUnits))
+      ))
+      .map((item) => ({ productId: item.productId, productName: item.productName }));
+    if (missingShippingProducts.length) {
+      const productNames = missingShippingProducts
+        .map((product) => product.productName)
+        .filter(Boolean)
+        .join(', ');
+      return this.shippingFailure(
+        'SHIPPING_DATA_MISSING',
+        `Shipping weight or bulk data is missing for: ${productNames || 'one or more cart items'}.`,
+        { missingShippingProducts },
+      );
+    }
+
+    const totalWeightKg = this.roundShippingValue(
+      items.reduce((total, item) => total + Number(item.resolvedWeightKg) * Number(item.quantity), 0),
+      3,
+    );
+    const totalBulkUnits = this.roundShippingValue(
+      items.reduce((total, item) => total + Number(item.resolvedBulkUnits) * Number(item.quantity), 0),
+      2,
+    );
+    const configRows = await this.databaseService.query<Record<string, unknown>>(`
+      SELECT * FROM SHIPPING_CONFIG WHERE is_active = 1
+    `);
+    const configRow = configRows.find((row) =>
+      Object.values(row).some((value) => String(value ?? '').trim().toLowerCase() === 'big'),
+    );
+    const config = configRow
+      ? {
+          packageLabel: 'Big',
+          maxWeightKg: Number(configRow.max_weight_kg),
+          maxBulkUnits: Number(configRow.max_bulk_units),
+        }
+      : null;
+    if (!config || !Number.isFinite(config.maxWeightKg) || !Number.isFinite(config.maxBulkUnits)) {
+      return this.shippingFailure('SHIPPING_DATA_MISSING', 'The active Big shipping configuration is unavailable.');
+    }
+
+    if (totalWeightKg > Number(config.maxWeightKg)) {
+      return this.shippingFailure('WEIGHT_EXCEEDED', 'The selected items exceed the maximum shipping weight.', {
+        totalWeightKg,
+        totalBulkUnits,
+        packageLabel: config.packageLabel,
+      });
+    }
+    if (totalBulkUnits > Number(config.maxBulkUnits)) {
+      return this.shippingFailure('BULK_EXCEEDED', 'The selected items exceed the maximum shipping bulk.', {
+        totalWeightKg,
+        totalBulkUnits,
+        packageLabel: config.packageLabel,
+      });
+    }
+
+    const destinationProvince = address.province?.trim() ?? '';
+    const rateLocations = this.shippingRateLocations(destinationProvince);
+    const rateRows = await this.databaseService.request<{ shippingFee: number }>((request) =>
+      request
+        .input('locations', sql.NVarChar(sql.MAX), JSON.stringify(rateLocations)).query(`
+          SELECT TOP 1 CAST(base_fee AS float) AS shippingFee
+          FROM SHIPPING_RATES
+          WHERE is_active = 1
+            AND LOWER(LTRIM(RTRIM(destination_province))) IN (
+              SELECT LOWER(LTRIM(RTRIM([value]))) FROM OPENJSON(@locations)
+            )
+          ORDER BY CASE
+            WHEN LOWER(LTRIM(RTRIM(destination_province))) = LOWER(LTRIM(RTRIM(JSON_VALUE(@locations, '$[0]')))) THEN 0
+            ELSE 1
+          END
+        `),
+    );
+    const rate = rateRows[0];
+    if (!rate) {
+      return this.shippingFailure('SHIPPING_RATE_NOT_FOUND', 'No active shipping rate is available for this province.', {
+        totalWeightKg,
+        totalBulkUnits,
+        packageLabel: config.packageLabel,
+        destinationProvince,
+      });
+    }
+
+    return {
+      allowed: true,
+      totalWeightKg,
+      totalBulkUnits,
+      packageLabel: config.packageLabel,
+      shippingFee: this.roundShippingValue(Number(rate.shippingFee), 2),
+      destinationProvince,
+    };
+  }
+
   async checkout(body: CheckoutBody, file?: UploadedReceiptFile) {
     const userId = body.userId;
     const selectedCartItemIds = this.parseSelectedCartItemIds(body.selectedCartItemIds);
-    const shippingFee = Number(body.shippingFee ?? 20);
     const paymentMethod = body.paymentMethod?.trim() || 'GCash';
     const referenceNumber = body.referenceNumber?.trim() ?? '';
 
@@ -229,16 +392,21 @@ export class CartService {
       throw new BadRequestException('Payment receipt screenshot is required');
     }
 
-    await this.ensureCheckoutColumns();
     const receiptUrl = `http://localhost:5000/uploads/receipts/${file.filename}`;
     const selectedCartItemIdsJson = JSON.stringify(selectedCartItemIds);
     const address = this.normalizeAddress(body);
+    const addressId = await this.resolveCheckoutAddressId(userId, body.addressId, address);
+    const shipping = await this.evaluateCheckoutShipping(userId, addressId, selectedCartItemIds);
+    if (!shipping.allowed) {
+      throw this.shippingException(shipping.code!, shipping.message!);
+    }
 
     const rows = await this.databaseService.request<{ orderId: string }>((request) =>
       request
         .input('userId', sql.UniqueIdentifier, userId)
+        .input('addressId', sql.UniqueIdentifier, addressId)
         .input('selectedCartItemIdsJson', sql.NVarChar(sql.MAX), selectedCartItemIdsJson)
-        .input('shippingFee', sql.Decimal(10, 2), Number.isFinite(shippingFee) ? shippingFee : 20)
+        .input('shippingFee', sql.Decimal(10, 2), shipping.shippingFee)
         .input('paymentMethod', sql.NVarChar(30), 'GCash')
         .input('referenceNumber', sql.NVarChar(100), referenceNumber)
         .input('receiptUrl', sql.NVarChar(500), receiptUrl)
@@ -248,7 +416,6 @@ export class CartService {
         .input('barangay', sql.NVarChar(100), address.barangay)
         .input('city', sql.NVarChar(100), address.city)
         .input('province', sql.NVarChar(100), address.province)
-        .input('region', sql.NVarChar(100), address.region)
         .input('postalCode', sql.NVarChar(10), address.postalCode).query(`
           SET XACT_ABORT ON;
 
@@ -291,49 +458,6 @@ export class CartService {
             WHERE label IN ('Order Placed', 'Pending')
             ORDER BY CASE WHEN label = 'Order Placed' THEN 0 ELSE 1 END
           );
-
-          DECLARE @addressId uniqueidentifier = (
-            SELECT TOP 1 address_id
-            FROM USER_ADDRESSES
-            WHERE user_id = @userId
-            ORDER BY is_default DESC, created_at DESC
-          );
-
-          IF @addressId IS NULL
-          BEGIN
-            SET @addressId = NEWID();
-
-            INSERT INTO USER_ADDRESSES (
-              address_id,
-              user_id,
-              label,
-              recipient_name,
-              phone,
-              street,
-              barangay,
-              city,
-              province,
-              region,
-              postal_code,
-              is_default,
-              created_at
-            )
-            VALUES (
-              @addressId,
-              @userId,
-              'Home',
-              @recipientName,
-              @phone,
-              @street,
-              @barangay,
-              @city,
-              @province,
-              @region,
-              @postalCode,
-              1,
-              GETDATE()
-            );
-          END
 
           DECLARE @orderId uniqueidentifier = NEWID();
           DECLARE @subtotal decimal(10, 2) = (
@@ -410,16 +534,27 @@ export class CartService {
         `),
     );
 
+    const orderId = rows[0]?.orderId;
+    if (orderId) {
+      void this.notificationsService.notifyOrder(userId, {
+        orderId, eventKey: 'order.placed', title: 'Order Placed', body: 'We received your order and will update you as it progresses.', data: { type: 'order', orderId },
+      }).catch(() => undefined);
+      void this.notificationsService.createAdminNotification({
+        type: 'order', entityType: 'order', entityId: orderId, eventKey: `order:${orderId}:placed`, title: 'New order received', body: `Order ${orderId.slice(0, 8)} was placed.`,
+      }).catch(() => undefined);
+    }
     return {
-      orderId: rows[0]?.orderId,
+      orderId,
       status: 'Order Placed',
       paymentMethod,
       referenceNumber,
       receiptUrl,
+      shippingFee: shipping.shippingFee,
     };
   }
 
-  private parseSelectedCartItemIds(value?: string) {
+  private parseSelectedCartItemIds(value?: string | string[]) {
+    if (Array.isArray(value)) return value.map(String).filter(Boolean);
     if (!value) return [];
 
     try {
@@ -443,9 +578,86 @@ export class CartService {
       barangay: body.barangay?.trim() || null,
       city: body.city?.trim() || 'Metro Manila',
       province: body.province?.trim() || 'Metro Manila',
-      region: body.region?.trim() || 'NCR',
       postalCode: body.postalCode?.trim() || null,
     };
+  }
+
+  private async getUserAddress(userId: string, addressId?: string) {
+    return this.databaseService.request<{ addressId: string; province: string | null }>((request) => {
+      request.input('userId', sql.UniqueIdentifier, userId);
+      if (addressId) request.input('addressId', sql.UniqueIdentifier, addressId);
+      return request.query(`
+        SELECT TOP 1
+          CONVERT(varchar(36), address_id) AS addressId,
+          province
+        FROM USER_ADDRESSES
+        WHERE user_id = @userId
+          ${addressId ? 'AND address_id = @addressId' : ''}
+        ORDER BY is_default DESC, created_at DESC
+      `);
+    });
+  }
+
+  private async resolveCheckoutAddressId(
+    userId: string,
+    requestedAddressId: string | undefined,
+    address: ReturnType<CartService['normalizeAddress']>,
+  ) {
+    const existing = await this.getUserAddress(userId, requestedAddressId);
+    if (existing[0]) return existing[0].addressId;
+    if (requestedAddressId) {
+      throw this.shippingException('SHIPPING_DATA_MISSING', 'The selected delivery address was not found.');
+    }
+
+    const inserted = await this.databaseService.request<{ addressId: string }>((request) =>
+      request
+        .input('userId', sql.UniqueIdentifier, userId)
+        .input('recipientName', sql.NVarChar(150), address.recipientName)
+        .input('phone', sql.NVarChar(20), address.phone)
+        .input('street', sql.NVarChar(255), address.street)
+        .input('barangay', sql.NVarChar(100), address.barangay)
+        .input('city', sql.NVarChar(100), address.city)
+        .input('province', sql.NVarChar(100), address.province)
+        .input('postalCode', sql.NVarChar(10), address.postalCode).query(`
+          INSERT INTO USER_ADDRESSES (
+            user_id, label, recipient_name, phone, street, barangay, city,
+            province, postal_code, is_default, created_at
+          )
+          OUTPUT CONVERT(varchar(36), inserted.address_id) AS addressId
+          VALUES (
+            @userId, 'Home', @recipientName, @phone, @street, @barangay, @city,
+            @province, @postalCode, 1, GETDATE()
+          )
+        `),
+    );
+    return inserted[0].addressId;
+  }
+
+  private shippingFailure(
+    code: NonNullable<ShippingEvaluation['code']>,
+    message: string,
+    details: Omit<ShippingEvaluation, 'allowed' | 'code' | 'message'> = {},
+  ): ShippingEvaluation {
+    return { allowed: false, code, message, ...details };
+  }
+
+  private shippingException(code: NonNullable<ShippingEvaluation['code']>, message: string) {
+    return new HttpException({ statusCode: 400, code, message }, 400);
+  }
+
+  private roundShippingValue(value: number, decimalPlaces: number) {
+    return Number(value.toFixed(decimalPlaces));
+  }
+
+  private shippingRateLocations(province: string) {
+    const locations = [province].map((value) => value.trim()).filter(Boolean);
+    const normalized = new Set(locations.map((value) => value.toLowerCase()));
+
+    if (normalized.has('metro manila') || normalized.has('ncr') || normalized.has('national capital region')) {
+      locations.push('Metro Manila', 'NCR', 'National Capital Region');
+    }
+
+    return [...new Set(locations.map((value) => value.trim()))];
   }
 
   private async ensureCheckoutColumns() {

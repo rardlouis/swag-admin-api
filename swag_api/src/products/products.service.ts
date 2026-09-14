@@ -29,6 +29,7 @@ export class ProductsService {
   }
 
   async create(createProductDto: CreateProductDto) {
+    await this.ensureProductStyleColumn();
     this.validateProduct(createProductDto);
     await this.validateCategoryGarmentType(createProductDto);
 
@@ -46,6 +47,7 @@ export class ProductsService {
       colorSchema.hasLegacyColorName ? '@colorName' : null,
     ].filter(Boolean);
 
+    const styleId = await this.resolveProductStyle(createProductDto.styleId, createProductDto.customStyle);
     const inserted = await this.databaseService.request((request) => {
       request
         .input('categoryId', sql.SmallInt, createProductDto.categoryId)
@@ -54,7 +56,10 @@ export class ProductsService {
         .input('description', sql.NVarChar(100), createProductDto.description ?? null)
         .input('price', sql.Decimal(10, 2), Number(createProductDto.price))
         .input('stockQty', sql.Int, quantity)
+        .input('weightKg', sql.Decimal(6, 3), this.toNullableShippingValue(createProductDto.weightKg))
+        .input('bulkUnits', sql.Decimal(5, 2), this.toNullableShippingValue(createProductDto.bulkUnits))
         .input('brand', sql.NVarChar(100), createProductDto.brand ?? null);
+      request.input('styleId', sql.SmallInt, styleId);
 
       if (colorSchema.hasColorId) request.input('colorId', sql.SmallInt, colorInputs.colorId);
       if (colorSchema.hasLegacyColorHex) request.input('colorHex', sql.NVarChar(7), colorInputs.colorHex);
@@ -62,13 +67,13 @@ export class ProductsService {
 
       return request.input('isActive', sql.Bit, createProductDto.isActive ?? true).query(`
           INSERT INTO PRODUCTS (
-            category_id, gender_id, name, description, price, stock_qty,
-            brand${colorColumns.length ? `, ${colorColumns.join(', ')}` : ''}, is_active
+            category_id, gender_id, name, description, price, stock_qty, weight_kg, bulk_units,
+            brand, style_id${colorColumns.length ? `, ${colorColumns.join(', ')}` : ''}, is_active
           )
           OUTPUT CONVERT(varchar(36), inserted.product_id) AS id
           VALUES (
-            @categoryId, @genderId, @name, @description, @price, @stockQty,
-            @brand${colorValues.length ? `, ${colorValues.join(', ')}` : ''}, @isActive
+            @categoryId, @genderId, @name, @description, @price, @stockQty, @weightKg, @bulkUnits,
+            @brand, @styleId${colorValues.length ? `, ${colorValues.join(', ')}` : ''}, @isActive
           )
         `);
     });
@@ -130,6 +135,7 @@ export class ProductsService {
   }
 
   async lookups() {
+    await this.ensureProductStyleColumn();
     await this.ensureColorLookups();
 
     const [hasGarmentTypes, hasPalettes, hasSizeRanges, hasPresetColors, hasColorFamilies] = await Promise.all([
@@ -180,7 +186,7 @@ export class ProductsService {
         ORDER BY sort_order ASC
       `;
 
-    const [categories, sizes, dbGarmentTypes, genders, palettes, colors, colorFamilies] = await Promise.all([
+    const [categories, sizes, dbGarmentTypes, genders, palettes, colors, colorFamilies, fashionStyles] = await Promise.all([
       this.databaseService.query(`
         SELECT
           category_id AS id,
@@ -223,6 +229,7 @@ export class ProductsService {
         FROM COLOR_FAMILIES
         ORDER BY label ASC
       `) : Promise.resolve([]),
+      this.databaseService.query(`SELECT style_id AS id, label FROM FASHION_STYLES ORDER BY label ASC`),
     ]);
 
     const garmentTypes = hasGarmentTypes
@@ -232,7 +239,7 @@ export class ProductsService {
           label: category.name,
         }));
 
-    return { categories, sizes, garmentTypes, genders, palettes, colors, colorFamilies };
+    return { categories, sizes, garmentTypes, genders, palettes, colors, colorFamilies, fashionStyles };
   }
 
   async measurementDefaults(sizeId: number, garmentTypeId: number) {
@@ -260,6 +267,7 @@ export class ProductsService {
   }
 
   async findAll() {
+    await this.ensureProductStyleColumn();
     const color = await this.productColorSelect();
     const hasDeletedColumn = await this.databaseService.columnExists('PRODUCTS', 'is_deleted');
     const deletedSelect = hasDeletedColumn ? 'p.is_deleted AS isDeleted,' : 'CAST(0 AS bit) AS isDeleted,';
@@ -271,8 +279,10 @@ export class ProductsService {
         p.name,
         p.description,
         CAST(p.price AS float) AS price,
+        CAST(p.weight_kg AS float) AS weightKg,
+        CAST(p.bulk_units AS float) AS bulkUnits,
         CAST(CASE WHEN sizeStock.totalQty IS NOT NULL THEN sizeStock.totalQty ELSE p.stock_qty END AS int) AS qty,
-        p.brand,
+        p.brand, fs.style_id AS styleId, fs.label AS fashionStyle,
         ${color.select},
         ${deletedSelect}
         p.avg_rating AS avgRating,
@@ -289,6 +299,7 @@ export class ProductsService {
       FROM PRODUCTS p
       INNER JOIN CATEGORIES c ON c.category_id = p.category_id
       LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
+      LEFT JOIN FASHION_STYLES fs ON fs.style_id = p.style_id
       ${color.join}
       OUTER APPLY (
         SELECT TOP 1 image_url
@@ -319,6 +330,7 @@ export class ProductsService {
   }
 
   async findOne(id: string) {
+    await this.ensureProductStyleColumn();
     const color = await this.productColorSelect();
     const hasDeletedColumn = await this.databaseService.columnExists('PRODUCTS', 'is_deleted');
     const deletedSelect = hasDeletedColumn ? 'p.is_deleted AS isDeleted,' : 'CAST(0 AS bit) AS isDeleted,';
@@ -330,8 +342,10 @@ export class ProductsService {
           p.name,
           p.description,
           CAST(p.price AS float) AS price,
+          CAST(p.weight_kg AS float) AS weightKg,
+          CAST(p.bulk_units AS float) AS bulkUnits,
           CAST(CASE WHEN sizeStock.totalQty IS NOT NULL THEN sizeStock.totalQty ELSE p.stock_qty END AS int) AS qty,
-          p.brand,
+          p.brand, fs.style_id AS styleId, fs.label AS fashionStyle,
           ${color.select},
           ${deletedSelect}
           p.avg_rating AS avgRating,
@@ -350,6 +364,7 @@ export class ProductsService {
         FROM PRODUCTS p
         INNER JOIN CATEGORIES c ON c.category_id = p.category_id
         LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
+        LEFT JOIN FASHION_STYLES fs ON fs.style_id = p.style_id
         ${color.join}
         OUTER APPLY (
           SELECT TOP 1 pss.size_id, ss.label, pss.stock_qty
@@ -445,9 +460,11 @@ export class ProductsService {
   }
 
   async update(id: string, updateProductDto: UpdateProductDto) {
+    await this.ensureProductStyleColumn();
     this.validateProduct(updateProductDto);
     await this.validateCategoryGarmentType(updateProductDto);
     const quantity = Number(updateProductDto.quantity ?? 0);
+    const styleId = await this.resolveProductStyle(updateProductDto.styleId, updateProductDto.customStyle);
     const colorSchema = await this.productColorSchema();
     const colorInputs = await this.resolveColorInputs(updateProductDto, colorSchema);
     const colorAssignments = [
@@ -465,7 +482,10 @@ export class ProductsService {
         .input('description', sql.NVarChar(100), updateProductDto.description ?? null)
         .input('price', sql.Decimal(10, 2), Number(updateProductDto.price))
         .input('stockQty', sql.Int, quantity)
+        .input('weightKg', sql.Decimal(6, 3), this.toNullableShippingValue(updateProductDto.weightKg))
+        .input('bulkUnits', sql.Decimal(5, 2), this.toNullableShippingValue(updateProductDto.bulkUnits))
         .input('brand', sql.NVarChar(100), updateProductDto.brand ?? null);
+      request.input('styleId', sql.SmallInt, styleId);
 
       if (colorSchema.hasColorId) request.input('colorId', sql.SmallInt, colorInputs.colorId);
       if (colorSchema.hasLegacyColorHex) request.input('colorHex', sql.NVarChar(7), colorInputs.colorHex);
@@ -480,7 +500,10 @@ export class ProductsService {
             description = @description,
             price = @price,
             stock_qty = @stockQty,
+            weight_kg = @weightKg,
+            bulk_units = @bulkUnits,
             brand = @brand,
+            style_id = @styleId,
             ${colorAssignments.length ? `${colorAssignments.join(',\n            ')},` : ''}
             is_active = @isActive
           WHERE product_id = @id
@@ -527,6 +550,26 @@ export class ProductsService {
     return { id, isDeleted: hasDeletedColumn, isActive: !hasDeletedColumn };
   }
 
+  private async ensureProductStyleColumn() {
+    if (!(await this.databaseService.columnExists('PRODUCTS', 'style_id'))) {
+      await this.databaseService.query(`ALTER TABLE PRODUCTS ADD style_id SMALLINT NULL; ALTER TABLE PRODUCTS ADD CONSTRAINT FK_PRODUCTS_FASHION_STYLE FOREIGN KEY (style_id) REFERENCES FASHION_STYLES(style_id);`);
+    }
+  }
+
+  private async resolveProductStyle(styleId?: number | null, customStyle?: string | null) {
+    const custom = customStyle?.trim();
+    if (custom) {
+      const rows = await this.databaseService.request<{ id: number }>((request) => request.input('label', sql.NVarChar(100), custom).query(`
+        IF EXISTS (SELECT 1 FROM FASHION_STYLES WHERE LOWER(label) = LOWER(@label))
+          SELECT TOP 1 style_id AS id FROM FASHION_STYLES WHERE LOWER(label) = LOWER(@label);
+        ELSE
+          INSERT INTO FASHION_STYLES (label) OUTPUT inserted.style_id AS id VALUES (@label);
+      `));
+      return rows[0]?.id ?? null;
+    }
+    return styleId ? Number(styleId) : null;
+  }
+
   private validateProduct(productDto: CreateProductDto | UpdateProductDto) {
     if (!productDto.name?.trim()) {
       throw new BadRequestException('Product name is required');
@@ -556,6 +599,18 @@ export class ProductsService {
     if (productDto.quantity === undefined || Number(productDto.quantity) < 0) {
       throw new BadRequestException('A valid quantity is required');
     }
+
+    this.toNullableShippingValue(productDto.weightKg);
+    this.toNullableShippingValue(productDto.bulkUnits);
+  }
+
+  private toNullableShippingValue(value?: number | string | null) {
+    if (value === undefined || value === null || value === '') return null;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      throw new BadRequestException('Shipping weight and bulk values must be zero or greater.');
+    }
+    return numeric;
   }
 
   private async validateCategoryGarmentType(productDto: CreateProductDto | UpdateProductDto) {

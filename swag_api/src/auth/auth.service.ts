@@ -2,6 +2,9 @@ import { BadRequestException, ConflictException, Injectable, UnauthorizedExcepti
 import * as sql from 'mssql/msnodesqlv8';
 import { createHash, randomInt, randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
+import { createSessionToken } from '../common/session-auth';
+import { NotificationsService } from '../notifications/notifications.service';
+import { hashPassword, passwordMatches } from '../common/passwords';
 
 type LoginBody = {
   login?: string;
@@ -31,14 +34,29 @@ type AppRegisterBody = {
   body_hip_cm?: number | string | null;
   body_height_cm?: number | string | null;
   email_verification_id?: string;
+  phone_verification_id?: string;
 };
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly databaseService: DatabaseService) {}
+  constructor(private readonly databaseService: DatabaseService, private readonly notificationsService: NotificationsService) {}
 
   async sendEmailOtp(rawEmail: string) {
     const email = this.normalizedEmail(rawEmail);
+    // A completed app registration is only possible after a successful email
+    // verification. Do this check before creating an OTP so an existing user
+    // cannot receive a fresh registration code.
+    const existingUser = await this.databaseService.request<{ userId: string }>((request) =>
+      request.input('email', sql.NVarChar(255), email).query(`
+        SELECT TOP 1 CONVERT(varchar(36), user_id) AS userId
+        FROM USERS
+        WHERE LOWER(email) = LOWER(@email)
+          AND is_admin = 0
+      `),
+    );
+    if (existingUser[0]) {
+      throw new ConflictException('This email is already registered. Log in or use another email.');
+    }
     await this.ensureEmailOtpsTable();
     if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) throw new BadRequestException('Email verification is not configured.');
     const latest = await this.databaseService.request<{ secondsSinceCreation: number }>((request) => request.input('email', sql.NVarChar(255), email).query(`SELECT TOP 1 DATEDIFF(SECOND, created_at, GETDATE()) AS secondsSinceCreation FROM EMAIL_OTPS WHERE email = @email ORDER BY created_at DESC`));
@@ -75,6 +93,170 @@ export class AuthService {
     return { verificationId: otp.id, email };
   }
 
+  async sendSmsOtp(rawPhone: string) {
+    const phone = this.normalizedPhilippinePhone(rawPhone);
+    await this.ensureSmsOtpVerificationsTable();
+
+    if (!process.env.IPROG_API_KEY) {
+      throw new BadRequestException('SMS verification is not configured.');
+    }
+
+    const latest = await this.databaseService.request<{ secondsSinceSent: number }>((request) =>
+      request.input('phone', sql.NVarChar(20), phone.iprog).query(`
+        SELECT TOP 1 DATEDIFF(SECOND, sent_at, GETDATE()) AS secondsSinceSent
+        FROM SMS_OTP_VERIFICATIONS
+        WHERE phone_number = @phone AND sent_at IS NOT NULL
+        ORDER BY sent_at DESC
+      `),
+    );
+    const secondsUntilResend = latest[0]
+      ? Math.max(0, 60 - Math.max(0, Number(latest[0].secondsSinceSent ?? 0)))
+      : 0;
+
+    if (latest[0] && secondsUntilResend > 0) {
+      throw new BadRequestException(`Please wait ${secondsUntilResend} seconds before requesting another code.`);
+    }
+
+    const verificationId = randomUUID();
+    const expiresAt = new Date(Date.now() + 5 * 60_000);
+    await this.databaseService.request((request) =>
+      request
+        .input('phone', sql.NVarChar(20), phone.iprog)
+        .input('id', sql.UniqueIdentifier, verificationId).query(`
+          UPDATE SMS_OTP_VERIFICATIONS
+          SET invalidated_at = GETDATE()
+          WHERE phone_number = @phone
+            AND verified_at IS NULL
+            AND invalidated_at IS NULL;
+
+          INSERT INTO SMS_OTP_VERIFICATIONS (
+            verification_id, phone_number, expires_at, attempts
+          ) VALUES (@id, @phone, DATEADD(MINUTE, 5, GETDATE()), 0);
+        `),
+    );
+
+    try {
+      const response = await fetch('https://www.iprogsms.com/api/v1/otp/send_otp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          api_token: process.env.IPROG_API_KEY,
+          phone_number: phone.iprog,
+          expires_in_minutes: 5,
+        }),
+      });
+      const payload = await response.json().catch(() => null) as { status?: string } | null;
+      if (!response.ok || payload?.status !== 'success') {
+        throw new Error('IPROG send request failed');
+      }
+    } catch {
+      await this.databaseService.request((request) =>
+        request.input('id', sql.UniqueIdentifier, verificationId).query(`
+          UPDATE SMS_OTP_VERIFICATIONS
+          SET invalidated_at = GETDATE()
+          WHERE verification_id = @id
+        `),
+      );
+      throw new BadRequestException('We could not send a verification SMS right now. Please try again.');
+    }
+
+    await this.databaseService.request((request) =>
+      request.input('id', sql.UniqueIdentifier, verificationId).query(`
+        UPDATE SMS_OTP_VERIFICATIONS SET sent_at = GETDATE() WHERE verification_id = @id
+      `),
+    );
+    return {
+      verificationId,
+      expiresAt: expiresAt.toISOString(),
+      expiresInSeconds: 5 * 60,
+      resendAfterSeconds: 60,
+    };
+  }
+
+  async verifySmsOtp(rawVerificationId: string | undefined, rawPhone: string | undefined, rawCode: string | undefined) {
+    const verificationId = rawVerificationId?.trim() ?? '';
+    const phone = this.normalizedPhilippinePhone(rawPhone ?? '');
+    const code = rawCode?.trim() ?? '';
+    if (!this.isUuid(verificationId)) throw new BadRequestException('Request a new verification code.');
+    if (!/^\d{6}$/.test(code)) throw new BadRequestException('Enter the complete 6-digit code.');
+    if (!process.env.IPROG_API_KEY) throw new BadRequestException('SMS verification is not configured.');
+
+    await this.ensureSmsOtpVerificationsTable();
+    const rows = await this.databaseService.request<{
+      attempts: number;
+      secondsRemaining: number;
+      invalidatedAt: Date | null;
+      verifiedAt: Date | null;
+    }>((request) =>
+      request
+        .input('id', sql.UniqueIdentifier, verificationId)
+        .input('phone', sql.NVarChar(20), phone.iprog).query(`
+          SELECT attempts,
+                 DATEDIFF(SECOND, GETDATE(), expires_at) AS secondsRemaining,
+                 invalidated_at AS invalidatedAt,
+                 verified_at AS verifiedAt
+          FROM SMS_OTP_VERIFICATIONS
+          WHERE verification_id = @id AND phone_number = @phone
+        `),
+    );
+    const session = rows[0];
+    if (!session || session.invalidatedAt || session.verifiedAt || Number(session.secondsRemaining) <= 0) {
+      throw new BadRequestException('This code has expired. Request a new one.');
+    }
+    if (Number(session.attempts) >= 5) {
+      throw new BadRequestException('Too many incorrect attempts. Request a new code.');
+    }
+
+    let providerAccepted = false;
+    try {
+      const response = await fetch('https://www.iprogsms.com/api/v1/otp/verify_otp', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          api_token: process.env.IPROG_API_KEY,
+          phone_number: phone.iprog,
+          otp: code,
+        }),
+      });
+      const payload = await response.json().catch(() => null) as { status?: string } | null;
+      // IPROG may use any successful 2xx status for the documented
+      // { status: "success" } response. Do not require HTTP 200 specifically.
+      providerAccepted = response.ok && String(payload?.status ?? '').trim().toLowerCase() === 'success';
+
+      // A provider 4xx response means the submitted OTP was rejected. Only a
+      // transport failure or a 5xx response is an availability problem.
+      if (!providerAccepted && response.status >= 500) {
+        throw new Error('IPROG verification request failed');
+      }
+    } catch {
+      throw new BadRequestException('SMS verification is unavailable right now. Please try again.');
+    }
+
+    if (!providerAccepted) {
+      await this.databaseService.request((request) =>
+        request.input('id', sql.UniqueIdentifier, verificationId).query(`
+          UPDATE SMS_OTP_VERIFICATIONS
+          SET attempts = attempts + 1,
+              invalidated_at = CASE WHEN attempts + 1 >= 5 THEN GETDATE() ELSE invalidated_at END
+          WHERE verification_id = @id AND verified_at IS NULL AND invalidated_at IS NULL
+        `),
+      );
+      if (Number(session.attempts) + 1 >= 5) {
+        throw new BadRequestException('Too many incorrect attempts. Request a new code.');
+      }
+      throw new BadRequestException('That code is not correct. Please try again.');
+    }
+
+    await this.databaseService.request((request) =>
+      request.input('id', sql.UniqueIdentifier, verificationId).query(`
+        UPDATE SMS_OTP_VERIFICATIONS
+        SET verified_at = GETDATE()
+        WHERE verification_id = @id AND verified_at IS NULL AND invalidated_at IS NULL
+      `),
+    );
+    return { verificationId, phone: phone.stored };
+  }
+
   async addressAutocomplete(text: string) {
     const query = text?.trim() ?? ''; if (query.length < 3) return { suggestions: [] };
     if (!process.env.GEOAPIFY_API_KEY) throw new BadRequestException('Address search is not configured.');
@@ -82,7 +264,7 @@ export class AuthService {
       const response = await fetch(`https://api.geoapify.com/v1/geocode/autocomplete?text=${encodeURIComponent(query)}&filter=countrycode:ph&bias=proximity:121.0,14.6&limit=5&format=json&apiKey=${encodeURIComponent(process.env.GEOAPIFY_API_KEY)}`);
       if (!response.ok) throw new Error('Geoapify request failed');
       const payload = await response.json() as { results?: Array<Record<string, unknown>> };
-      return { suggestions: (payload.results ?? []).map((item) => ({ label: item.formatted ?? '', houseNo: item.housenumber ?? '', street: item.street ?? item.address_line1 ?? '', barangay: item.suburb ?? item.district ?? '', city: item.city ?? item.county ?? '', province: item.state ?? '', zip: item.postcode ?? '', country: item.country ?? 'Philippines', latitude: item.lat ?? null, longitude: item.lon ?? null })) };
+      return { suggestions: (payload.results ?? []).map((item) => ({ label: item.formatted ?? '', houseNo: item.housenumber ?? '', street: item.street ?? item.address_line1 ?? '', barangay: item.suburb ?? item.district ?? '', city: item.city ?? item.county ?? '', province: item.state ?? '', region: item.state_district ?? item.region ?? '', zip: item.postcode ?? '', country: item.country ?? 'Philippines', latitude: item.lat ?? null, longitude: item.lon ?? null })) };
     } catch { throw new BadRequestException('Address suggestions are unavailable right now.'); }
   }
 
@@ -124,7 +306,7 @@ export class AuthService {
 
     const user = users[0];
 
-    if (!user || !this.passwordMatches(password, String(user.passwordHash ?? ''))) {
+    if (!user || !(await passwordMatches(password, String(user.passwordHash ?? '')))) {
       throw new UnauthorizedException('Invalid admin credentials');
     }
 
@@ -132,11 +314,12 @@ export class AuthService {
 
     return {
       user,
-      token: Buffer.from(`${user.id}:${Date.now()}`).toString('base64'),
+      token: createSessionToken(user.id, true),
     };
   }
 
   async appLogin(body: LoginBody) {
+    await this.finalizeExpiredDeletions();
     const email = (body.email ?? body.login ?? '').trim();
     const password = body.password ?? '';
 
@@ -199,22 +382,120 @@ export class AuthService {
           WHERE user_id = u.user_id
           ORDER BY is_default DESC, created_at DESC
         ) a
-        WHERE u.email = @email AND u.is_active = 1 AND u.is_admin = 0
+        WHERE u.email = @email AND u.is_admin = 0 AND u.deletion_finalized_at IS NULL
       `),
     );
 
     const user = users[0];
 
-    if (!user || !this.passwordMatches(password, String(user.passwordHash ?? ''))) {
+    if (!user || !(await passwordMatches(password, String(user.passwordHash ?? '')))) {
       throw new UnauthorizedException('Invalid email or password');
+    }
+
+    if (!user.is_active) {
+      await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, user.user_id).query(`
+        UPDATE USERS SET is_active = 1, deactivated_at = NULL, deletion_due_at = NULL WHERE user_id = @userId;
+        UPDATE CONVERSATIONS SET is_active = 1 WHERE buyer_id = @userId;
+      `));
+      user.is_active = true;
     }
 
     delete (user as { passwordHash?: string }).passwordHash;
 
     return {
       user,
-      token: Buffer.from(`${user.user_id}:${Date.now()}`).toString('base64'),
+      token: createSessionToken(user.user_id, false),
     };
+  }
+
+  async reverseGeocodeAddress(latitude: string, longitude: string) {
+    const lat = Number(latitude);
+    const lon = Number(longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+      throw new BadRequestException('A valid location is required.');
+    }
+    if (!process.env.GEOAPIFY_API_KEY) throw new BadRequestException('Address search is not configured.');
+
+    try {
+      const response = await fetch(`https://api.geoapify.com/v1/geocode/reverse?lat=${encodeURIComponent(String(lat))}&lon=${encodeURIComponent(String(lon))}&filter=countrycode:ph&limit=1&format=json&apiKey=${encodeURIComponent(process.env.GEOAPIFY_API_KEY)}`);
+      if (!response.ok) throw new Error('Geoapify request failed');
+      const payload = await response.json() as { results?: Array<Record<string, unknown>> };
+      const item = payload.results?.[0];
+      if (!item) throw new Error('No address result');
+      return {
+        address: {
+          label: item.formatted ?? '',
+          houseNo: item.housenumber ?? '',
+          street: item.street ?? item.address_line1 ?? '',
+          barangay: item.suburb ?? item.district ?? '',
+          city: item.city ?? item.county ?? '',
+          province: item.state ?? '',
+          // Region is UI-only: the live USER_ADDRESSES table has no region column.
+          region: item.state_district ?? item.region ?? '',
+          zip: item.postcode ?? '',
+        },
+      };
+    } catch {
+      throw new BadRequestException('Your location could not be converted to an address right now.');
+    }
+  }
+
+  async deleteAppAccount(userId: string, body: { email?: string; password?: string; confirmation?: string }) {
+    await this.ensureAccountDeletionColumns();
+    await this.finalizeExpiredDeletions();
+    const email = this.normalizedEmail(body.email ?? '');
+    if (body.confirmation?.trim() !== 'DELETE') throw new BadRequestException('Type DELETE to confirm account deletion.');
+    const rows = await this.databaseService.request<{ email: string; passwordHash: string }>((request) => request
+      .input('userId', sql.UniqueIdentifier, userId).query(`
+        SELECT email, password_hash AS passwordHash FROM USERS WHERE user_id = @userId AND is_active = 1
+      `));
+    const user = rows[0];
+    if (!user || user.email.toLowerCase() !== email || !(await passwordMatches(body.password ?? '', user.passwordHash))) {
+      throw new UnauthorizedException('Email or password is incorrect.');
+    }
+    await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, userId).query(`
+      UPDATE USERS
+      SET is_active = 0, deactivated_at = GETDATE(), deletion_due_at = DATEADD(day, 30, GETDATE()), deletion_finalized_at = NULL
+      WHERE user_id = @userId;
+      UPDATE CONVERSATIONS SET is_active = 0 WHERE buyer_id = @userId;
+      DELETE FROM CART_ITEMS WHERE user_id = @userId;
+      IF OBJECT_ID('dbo.SAVED_PRODUCTS', 'U') IS NOT NULL DELETE FROM SAVED_PRODUCTS WHERE user_id = @userId;
+    `));
+    return { deactivated: true, deletionDueAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() };
+  }
+
+  async reactivateAppAccount(body: { email?: string; password?: string }) {
+    await this.ensureAccountDeletionColumns();
+    await this.finalizeExpiredDeletions();
+    const email = this.normalizedEmail(body.email ?? '');
+    const rows = await this.databaseService.request<{ userId: string; passwordHash: string; finalizedAt: Date | null }>((request) => request
+      .input('email', sql.NVarChar(255), email)
+      .query(`SELECT CONVERT(varchar(36), user_id) AS userId, password_hash AS passwordHash, deletion_finalized_at AS finalizedAt FROM USERS WHERE email = @email AND is_active = 0`));
+    const user = rows[0];
+    if (!user || user.finalizedAt || !(await passwordMatches(body.password ?? '', user.passwordHash))) throw new UnauthorizedException('This account cannot be reactivated with those credentials.');
+    await this.databaseService.request((request) => request.input('email', sql.NVarChar(255), email).query(`
+      UPDATE USERS SET is_active = 1, deactivated_at = NULL, deletion_due_at = NULL WHERE email = @email;
+      UPDATE CONVERSATIONS SET is_active = 1 WHERE buyer_id = (SELECT user_id FROM USERS WHERE email = @email);
+    `));
+    return this.appLogin({ email, password: body.password ?? '' });
+  }
+
+  private async ensureAccountDeletionColumns() {
+    await this.databaseService.query(`
+      IF COL_LENGTH('USERS', 'deactivated_at') IS NULL ALTER TABLE USERS ADD deactivated_at DATETIME2 NULL;
+      IF COL_LENGTH('USERS', 'deletion_due_at') IS NULL ALTER TABLE USERS ADD deletion_due_at DATETIME2 NULL;
+      IF COL_LENGTH('USERS', 'deletion_finalized_at') IS NULL ALTER TABLE USERS ADD deletion_finalized_at DATETIME2 NULL;
+    `);
+  }
+
+  private async finalizeExpiredDeletions() {
+    await this.ensureAccountDeletionColumns();
+    await this.databaseService.query(`
+      UPDATE USERS
+      SET email = CONCAT('deleted-', CONVERT(varchar(36), user_id), '@deleted.local'), phone = NULL,
+          password_hash = CONVERT(varchar(36), NEWID()), deletion_finalized_at = GETDATE()
+      WHERE is_active = 0 AND deletion_due_at IS NOT NULL AND deletion_due_at <= GETDATE() AND deletion_finalized_at IS NULL;
+    `);
   }
 
   async appRegister(body: unknown) {
@@ -222,9 +503,17 @@ export class AuthService {
     const email = payload.email?.trim().toLowerCase() ?? '';
     const password = payload.password ?? '';
     const fullName = payload.full_name?.trim() ?? '';
-    const phone = payload.phone?.trim() || null;
     const idNumber = payload.id_number?.trim() || null;
-    const shippingAddress = payload.shipping_address?.trim() || null;
+    const addressHouseNo = payload.address_house_no?.trim() || null;
+    const addressStreet = payload.address_street?.trim() || null;
+    const addressBarangay = payload.address_barangay?.trim() || null;
+    const addressCity = payload.address_city?.trim() || null;
+    const addressProvince = payload.address_province?.trim() || null;
+    const addressZip = payload.address_zip?.trim() || null;
+    const shippingAddress = payload.shipping_address?.trim() || [addressHouseNo, addressStreet, addressBarangay, addressCity, addressProvince, addressZip]
+      .filter(Boolean)
+      .join(', ') || null;
+    const streetLine = [addressHouseNo, addressStreet].filter(Boolean).join(', ') || shippingAddress;
     const styleLabel = payload.fashion_style?.split(',')[0]?.trim() || null;
     const preferredSizeLabel = payload.preferred_size?.trim() || null;
     const idTypeLabel = this.normalizeIdType(payload.id_type);
@@ -237,7 +526,9 @@ export class AuthService {
     if (!email || !password || !fullName) {
       throw new BadRequestException('Email, password, and full name are required');
     }
+    const phone = this.normalizedPhilippinePhone(payload.phone ?? '').stored;
     await this.requireVerifiedEmail(email, payload.email_verification_id);
+    await this.requireVerifiedSms(phone, payload.phone_verification_id);
     this.validateAppAccountFields({ email, password, fullName, phone, shippingAddress });
 
     if (!bodyChestCm || !bodyWaistCm || !bodyHipCm) {
@@ -269,10 +560,11 @@ export class AuthService {
     const styleId = await this.findStyleId(styleLabel);
     const preferredSizeId = await this.findSizeId(preferredSizeLabel);
 
+    const passwordHash = await hashPassword(password);
     const inserted = await this.databaseService.request<{ userId: string }>((request) =>
       request
         .input('email', sql.NVarChar(255), email)
-        .input('password', sql.NVarChar(255), password)
+        .input('passwordHash', sql.NVarChar(255), passwordHash)
         .input('fullName', sql.NVarChar(150), fullName)
         .input('phone', sql.NVarChar(20), phone)
         .input('idTypeId', sql.TinyInt, idTypes[0]?.idTypeId ?? null)
@@ -306,7 +598,7 @@ export class AuthService {
           OUTPUT CONVERT(varchar(36), inserted.user_id) AS userId
           VALUES (
             @email,
-            @password,
+            @passwordHash,
             @fullName,
             @phone,
             @idTypeId,
@@ -333,18 +625,27 @@ export class AuthService {
           .input('userId', sql.UniqueIdentifier, userId)
           .input('recipientName', sql.NVarChar(150), fullName)
           .input('phone', sql.NVarChar(20), phone)
-          .input('street', sql.NVarChar(255), shippingAddress)
-          .input('city', sql.NVarChar(100), 'Not specified')
+          .input('street', sql.NVarChar(255), streetLine)
+          .input('barangay', sql.NVarChar(100), addressBarangay)
+          .input('city', sql.NVarChar(100), addressCity)
+          .input('province', sql.NVarChar(100), addressProvince)
+          .input('postalCode', sql.NVarChar(10), addressZip)
           .input('isDefault', sql.Bit, 1).query(`
             INSERT INTO USER_ADDRESSES (
-              user_id, label, recipient_name, phone, street, city, is_default
+              user_id, label, recipient_name, phone, street,
+              barangay, city, province, postal_code, is_default
             )
             VALUES (
-              @userId, 'Home', @recipientName, @phone, @street, @city, @isDefault
+              @userId, 'Home', @recipientName, @phone, @street,
+              @barangay, @city, @province, @postalCode, @isDefault
             )
           `),
       );
     }
+
+    // Registration is already complete at this point. Delivery failure is
+    // best-effort and must not turn a successful registration into a failure.
+    void this.notificationsService.sendWelcomeEmail(userId).catch(() => undefined);
 
     return this.appLogin({ email, password });
   }
@@ -419,9 +720,10 @@ export class AuthService {
     const addressCity = payload.address_city?.trim() || null;
     const addressProvince = payload.address_province?.trim() || null;
     const addressZip = payload.address_zip?.trim() || null;
-    const shippingAddress = payload.shipping_address?.trim() || [addressHouseNo, addressStreet]
+    const shippingAddress = payload.shipping_address?.trim() || [addressHouseNo, addressStreet, addressBarangay, addressCity, addressProvince, addressZip]
       .filter(Boolean)
       .join(', ') || null;
+    const streetLine = [addressHouseNo, addressStreet].filter(Boolean).join(', ') || shippingAddress;
 
     if (!userId?.trim()) {
       throw new BadRequestException('User id is required');
@@ -458,9 +760,9 @@ export class AuthService {
         .input('email', sql.NVarChar(255), email)
         .input('fullName', sql.NVarChar(150), fullName)
         .input('phone', sql.NVarChar(20), phone)
-        .input('shippingAddress', sql.NVarChar(255), shippingAddress)
+        .input('street', sql.NVarChar(255), streetLine)
         .input('barangay', sql.NVarChar(100), addressBarangay)
-        .input('city', sql.NVarChar(100), addressCity || 'Not specified')
+        .input('city', sql.NVarChar(100), addressCity)
         .input('province', sql.NVarChar(100), addressProvince)
         .input('postalCode', sql.NVarChar(10), addressZip).query(`
           UPDATE USERS
@@ -483,7 +785,7 @@ export class AuthService {
             SET
               recipient_name = @fullName,
               phone = @phone,
-              street = COALESCE(@shippingAddress, ''),
+              street = COALESCE(@street, ''),
               barangay = @barangay,
               city = @city,
               province = @province,
@@ -491,13 +793,13 @@ export class AuthService {
               is_default = 1
             WHERE address_id = @addressId;
           END
-          ELSE IF NULLIF(@shippingAddress, '') IS NOT NULL
+          ELSE IF NULLIF(@street, '') IS NOT NULL
           BEGIN
             INSERT INTO USER_ADDRESSES (
               user_id, label, recipient_name, phone, street, barangay, city, province, postal_code, is_default
             )
             VALUES (
-              @userId, 'Home', @fullName, @phone, @shippingAddress, @barangay, @city, @province, @postalCode, 1
+              @userId, 'Home', @fullName, @phone, @street, @barangay, @city, @province, @postalCode, 1
             );
           END
         `),
@@ -547,16 +849,6 @@ export class AuthService {
     }
 
     return { user };
-  }
-
-  private passwordMatches(password: string, passwordHash: string) {
-    if (!passwordHash) {
-      return false;
-    }
-
-    // Existing local data has used plain text admin passwords. Keep that
-    // compatible so the admin account can be repaired without extra packages.
-    return password === passwordHash;
   }
 
   private validateAppAccountFields({
@@ -662,6 +954,27 @@ export class AuthService {
     return email;
   }
 
+  private normalizedPhilippinePhone(value: string) {
+    const digits = value.replace(/\D/g, '');
+    let stored: string;
+
+    if (/^9\d{9}$/.test(digits)) {
+      stored = digits;
+    } else if (/^09\d{9}$/.test(digits)) {
+      stored = digits.slice(1);
+    } else if (/^639\d{9}$/.test(digits)) {
+      stored = digits.slice(2);
+    } else {
+      throw new BadRequestException('Phone must be a valid Philippine mobile number.');
+    }
+
+    return { stored, iprog: `0${stored}` };
+  }
+
+  private isUuid(value: string) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  }
+
   private otpHash(email: string, code: string) {
     return createHash('sha256').update(`${email}:${code}`).digest('hex');
   }
@@ -685,6 +998,26 @@ export class AuthService {
     `);
   }
 
+  private async ensureSmsOtpVerificationsTable() {
+    await this.databaseService.query(`
+      IF OBJECT_ID('dbo.SMS_OTP_VERIFICATIONS', 'U') IS NULL
+      BEGIN
+        CREATE TABLE dbo.SMS_OTP_VERIFICATIONS (
+          verification_id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
+          phone_number NVARCHAR(20) NOT NULL,
+          expires_at DATETIME2 NOT NULL,
+          attempts INT NOT NULL DEFAULT 0,
+          created_at DATETIME2 NOT NULL DEFAULT GETDATE(),
+          sent_at DATETIME2 NULL,
+          verified_at DATETIME2 NULL,
+          invalidated_at DATETIME2 NULL
+        );
+        CREATE INDEX IX_SMS_OTP_VERIFICATIONS_PHONE_CREATED
+          ON dbo.SMS_OTP_VERIFICATIONS (phone_number, created_at DESC);
+      END
+    `);
+  }
+
   private async requireVerifiedEmail(email: string, verificationId?: string) {
     if (!verificationId) throw new BadRequestException('Verify your email before creating an account.');
     await this.ensureEmailOtpsTable();
@@ -695,6 +1028,28 @@ export class AuthService {
       `),
     );
     if (!Number(verified[0]?.count)) throw new BadRequestException('Verify your email before creating an account.');
+  }
+
+  private async requireVerifiedSms(storedPhone: string, verificationId?: string) {
+    if (!verificationId || !this.isUuid(verificationId)) {
+      throw new BadRequestException('Verify your phone number before creating an account.');
+    }
+    await this.ensureSmsOtpVerificationsTable();
+    const verified = await this.databaseService.request<{ count: number }>((request) =>
+      request
+        .input('id', sql.UniqueIdentifier, verificationId)
+        .input('phone', sql.NVarChar(20), `0${storedPhone}`).query(`
+          SELECT COUNT(*) AS count
+          FROM SMS_OTP_VERIFICATIONS
+          WHERE verification_id = @id
+            AND phone_number = @phone
+            AND verified_at IS NOT NULL
+            AND invalidated_at IS NULL
+        `),
+    );
+    if (!Number(verified[0]?.count)) {
+      throw new BadRequestException('Verify your phone number before creating an account.');
+    }
   }
 
   private async findStyleId(styleLabel: string | null) {

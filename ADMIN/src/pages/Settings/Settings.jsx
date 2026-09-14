@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   MdAdminPanelSettings,
   MdBadge,
@@ -15,7 +15,7 @@ import {
   MdToggleOff,
   MdToggleOn,
 } from "react-icons/md";
-import { apiPatch, apiUploadOne } from "../../api.js";
+import { apiGet, apiPatch, apiPost, apiUploadOne } from "../../api.js";
 import { getAdminDisplayName, getAdminInitial, getAdminPhotoUrl, getAdminRole, getStoredAdminUser, setStoredAdminUser } from "../../session.js";
 import "./Settings.css";
 
@@ -33,17 +33,6 @@ const buildInitialSettings = (user) => ({
   confirmPassword: "",
 });
 
-const idTypes = [
-  "PhilSys",
-  "Driver's License",
-  "Passport",
-  "SSS",
-  "GSIS",
-  "PhilHealth",
-  "Voter's ID",
-  "TIN",
-];
-
 export default function Settings() {
   const adminUser = getStoredAdminUser();
   const initialSettings = useMemo(() => buildInitialSettings(adminUser), [adminUser]);
@@ -56,6 +45,13 @@ export default function Settings() {
   const [notificationStatus, setNotificationStatus] = useState(
     typeof Notification === "undefined" ? "unsupported" : Notification.permission
   );
+  const [idTypes, setIdTypes] = useState([]);
+  const [newAdmin, setNewAdmin] = useState({ fullName: "", email: "", phone: "", idType: "", idNumber: "", password: "", confirmPassword: "" });
+  const [creatingAdmin, setCreatingAdmin] = useState(false);
+
+  useEffect(() => {
+    apiGet("/admin/id-types").then(setIdTypes).catch(() => setIdTypes([]));
+  }, []);
 
   const updateField = (field, value) => {
     setSettings((prev) => ({ ...prev, [field]: value }));
@@ -140,6 +136,22 @@ export default function Settings() {
     updateField("allowNotifications", permission === "granted");
   };
 
+  const createAdmin = async (event) => {
+    event.preventDefault();
+    setSaveStatus("");
+    setSaveError("");
+    setCreatingAdmin(true);
+    try {
+      const created = await apiPost("/admin/admins", newAdmin);
+      setNewAdmin({ fullName: "", email: "", phone: "", idType: "", idNumber: "", password: "", confirmPassword: "" });
+      setSaveStatus(`${created.fullName} can now sign in as an administrator.`);
+    } catch (err) {
+      setSaveError(err.message || "Could not create the administrator.");
+    } finally {
+      setCreatingAdmin(false);
+    }
+  };
+
   return (
     <div className="settings-page">
       <div className="settings-header">
@@ -219,14 +231,15 @@ export default function Settings() {
         <section className="settings-card">
           <div className="settings-card-head">
             <h2>Identity</h2>
-            <p>Uses ID_TYPES with USERS.id_type_id and id_number.</p>
+            <p>Keep the identity details associated with your administrator account up to date.</p>
           </div>
 
           <label className="settings-field">
             <span><MdBadge size={15} /> ID Type</span>
             <select value={settings.idType} onChange={(e) => updateField("idType", e.target.value)}>
+              <option value="">Select ID type</option>
               {idTypes.map((type) => (
-                <option key={type} value={type}>{type}</option>
+                <option key={type.id} value={type.label}>{type.label}</option>
               ))}
             </select>
           </label>
@@ -257,6 +270,18 @@ export default function Settings() {
               </div>
             </div>
           </div>
+        </section>
+
+        <section className="settings-card">
+          <div className="settings-card-head"><h2>Administrator Management</h2><p>Create an additional administrator account. This access is protected server-side.</p></div>
+          <div className="settings-field"><span><MdPerson size={15} /> Full Name</span><input value={newAdmin.fullName} onChange={(e) => setNewAdmin((current) => ({ ...current, fullName: e.target.value }))} /></div>
+          <div className="settings-field"><span><MdMail size={15} /> Email</span><input type="email" value={newAdmin.email} onChange={(e) => setNewAdmin((current) => ({ ...current, email: e.target.value }))} /></div>
+          <div className="settings-field"><span><MdPhone size={15} /> Phone</span><input value={newAdmin.phone} onChange={(e) => setNewAdmin((current) => ({ ...current, phone: e.target.value }))} /></div>
+          <div className="settings-field"><span><MdBadge size={15} /> ID Type</span><select value={newAdmin.idType} onChange={(e) => setNewAdmin((current) => ({ ...current, idType: e.target.value }))}><option value="">No ID type</option>{idTypes.map((type) => <option key={type.id} value={type.label}>{type.label}</option>)}</select></div>
+          <div className="settings-field"><span><MdBadge size={15} /> ID Number</span><input value={newAdmin.idNumber} onChange={(e) => setNewAdmin((current) => ({ ...current, idNumber: e.target.value }))} /></div>
+          <div className="settings-field"><span><MdLock size={15} /> Temporary Password</span><input type="password" value={newAdmin.password} onChange={(e) => setNewAdmin((current) => ({ ...current, password: e.target.value }))} /></div>
+          <div className="settings-field"><span><MdSecurity size={15} /> Confirm Password</span><input type="password" value={newAdmin.confirmPassword} onChange={(e) => setNewAdmin((current) => ({ ...current, confirmPassword: e.target.value }))} /></div>
+          <button className="settings-save-btn" disabled={creatingAdmin} type="button" onClick={createAdmin}>{creatingAdmin ? "Creating..." : "Create Administrator"}</button>
         </section>
 
         <section className="settings-card">

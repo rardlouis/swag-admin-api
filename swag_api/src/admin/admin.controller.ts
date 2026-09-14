@@ -1,8 +1,9 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { AdminService } from './admin.service';
+import { AdminGuard } from '../common/session-auth';
 
 type UploadedProfileFile = {
   filename: string;
@@ -10,6 +11,7 @@ type UploadedProfileFile = {
 };
 
 @Controller('admin')
+@UseGuards(AdminGuard)
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
@@ -34,8 +36,8 @@ export class AdminController {
   }
 
   @Patch('orders/:id/status')
-  updateOrderStatus(@Param('id') id: string, @Body('status') status: string) {
-    return this.adminService.updateOrderStatus(id, status);
+  updateOrderStatus(@Param('id') id: string, @Body() body: { status?: string; trackingNumber?: string; trackingUrl?: string; cancellationReason?: string }) {
+    return this.adminService.updateOrderStatus(id, body.status ?? '', body.trackingNumber, body.trackingUrl, body.cancellationReason);
   }
 
   @Get('reviews')
@@ -96,6 +98,21 @@ export class AdminController {
   @Get('notifications')
   notifications() {
     return this.adminService.notifications();
+  }
+
+  @Get('id-types')
+  idTypes() {
+    return this.adminService.idTypes();
+  }
+
+  @Post('admins')
+  createAdmin(@Body() body: unknown) {
+    return this.adminService.createAdmin(body);
+  }
+
+  @Patch('notifications/:id/read')
+  markNotificationRead(@Param('id') id: string) {
+    return this.adminService.markNotificationRead(id);
   }
 
   @Patch('profile/:id')

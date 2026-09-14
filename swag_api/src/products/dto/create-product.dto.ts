@@ -11,7 +11,11 @@ export class CreateProductDto {
   }>;
   price?: number;
   quantity?: number;
+  weightKg?: number | null;
+  bulkUnits?: number | null;
   brand?: string | null;
+  styleId?: number | null;
+  customStyle?: string | null;
   colorId?: number | null;
   colorName?: string | null;
   colorHex?: string | null;

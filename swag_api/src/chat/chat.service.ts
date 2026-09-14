@@ -22,6 +22,7 @@ type ConversationRow = {
   orderId: string | null;
   orderStatus: string | null;
   reviewed: boolean | number | null;
+  isBot: boolean | number | null;
 };
 
 type MessageRow = {
@@ -48,6 +49,20 @@ type BotContext = {
   saved: string;
 };
 
+type ChatbotAction = {
+  id: string;
+  label: string;
+  prompt: string;
+  action?: 'OPEN_TRY_ON' | 'OPEN_TRACKING' | 'OPEN_ORDER_DETAILS' | 'ADD_TO_CART' | 'TRANSFER_TO_AGENT';
+};
+
+type ChatbotReply = {
+  text: string;
+  quickActions: ChatbotAction[];
+  action?: ChatbotAction['action'];
+  orderId?: string;
+};
+
 @Injectable()
 export class ChatService {
   // Public clients may ask for "gemini-bot", but USERS.user_id is a uniqueidentifier.
@@ -67,6 +82,7 @@ export class ChatService {
         SELECT
           CONVERT(varchar(36), c.convo_id) AS id,
           CASE WHEN seller.is_bot = 1 THEN seller.full_name ELSE COALESCE(p.name, 'A''FRO Official Support') END AS name,
+          seller.is_bot AS isBot,
           latest.body AS lastMsg,
           COALESCE(latest.sent_at, c.last_message_at) AS time,
           COUNT(CASE WHEN m.is_read = 0 AND m.sender_id = c.seller_id THEN 1 END) AS unread,
@@ -172,6 +188,11 @@ export class ChatService {
 
       return {
         id: conversation.id,
+        isAi: Boolean(conversation.isBot),
+        type: Boolean(conversation.isBot) ? 'ai' : 'support',
+        chatbot: Boolean(conversation.isBot)
+          ? { quickActions: conversation.productId ? this.productActions(conversation.productId) : this.generalActions() }
+          : undefined,
         name: conversation.productName
           ? `Inquiry: ${conversation.productName}`
           : conversation.name,
@@ -211,7 +232,9 @@ export class ChatService {
     }
 
     await this.ensureProduct(productId);
-    const adminId = await this.adminUserId();
+    // Product inquiries start in the product-aware AI flow. It can still be
+    // reassigned to an admin by switchConversationToHuman when needed.
+    const adminId = this.geminiBotUserId;
 
     const existing = await this.databaseService.request<{ id: string }>(
       (request) =>
@@ -257,7 +280,7 @@ export class ChatService {
         .input('conversationId', sql.UniqueIdentifier, conversationId)
         .input('adminId', sql.UniqueIdentifier, adminId).query(`
           INSERT INTO MESSAGES (convo_id, sender_id, body, is_read, sent_at)
-          VALUES (@conversationId, @adminId, 'Hi! This is A''FRO Official Support. How can we help with this product?', 0, SYSUTCDATETIME())
+          VALUES (@conversationId, @adminId, 'Hi! I can help with this item’s measurements, availability, shipping, condition, or AI Try-On. What would you like to check?', 0, SYSUTCDATETIME())
         `),
     );
 
@@ -313,12 +336,14 @@ export class ChatService {
       `),
     );
 
+    let chatbot: ChatbotReply | undefined;
     if (this.isBotConversation(conversation[0])) {
       const reply = await this.createBotReply(conversationId, userId);
-      await this.saveBotMessage(conversationId, reply);
+      await this.saveBotMessage(conversationId, reply.text);
+      chatbot = reply;
     }
 
-    return this.conversation(userId, conversationId);
+    return { ...(await this.conversation(userId, conversationId)), chatbot };
   }
 
   async markRead(conversationId: string, userId: string) {
@@ -380,37 +405,8 @@ export class ChatService {
     // customer before using their id in a conversation insert.
     await this.ensureUser(userId);
 
-    const existing = await this.databaseService.request<{ id: string }>(
-      (request) =>
-        request
-          .input('userId', sql.UniqueIdentifier, userId)
-          .input('botUserId', sql.UniqueIdentifier, this.geminiBotUserId)
-          .query(`
-          SELECT TOP 1 CONVERT(varchar(36), convo_id) AS id
-          FROM CONVERSATIONS
-          WHERE buyer_id = @userId
-            AND seller_id = @botUserId
-            AND product_id IS NULL
-            AND is_active = 1
-          ORDER BY COALESCE(last_message_at, SYSUTCDATETIME()) DESC
-        `),
-    );
-
-    if (existing[0]) {
-      await this.databaseService.request((request) =>
-        request.input('conversationId', sql.UniqueIdentifier, existing[0].id)
-          .query(`
-          UPDATE CONVERSATIONS
-          SET buyer_deleted_at = NULL,
-              seller_deleted_at = NULL,
-                last_message_at = COALESCE(last_message_at, SYSUTCDATETIME())
-          WHERE convo_id = @conversationId
-        `),
-      );
-
-      return this.conversation(userId, existing[0].id);
-    }
-
+    // The Messages-page AI Chat action intentionally starts a fresh session.
+    // Older sessions remain in the customer's history and are never reopened.
     const created = await this.databaseService.request<{ id: string }>(
       (request) =>
         request
@@ -432,32 +428,36 @@ export class ChatService {
     return this.conversation(userId, conversationId);
   }
 
-  private async createBotReply(conversationId: string, userId: string) {
+  private async createBotReply(conversationId: string, userId: string): Promise<ChatbotReply> {
     try {
       if (await this.isBotRateLimited(userId)) {
-        return 'I can answer up to 20 messages per hour. Please try me again a little later.';
+        return this.reply('I can answer up to 20 messages per hour. Please try me again a little later.');
       }
 
       const latestMessage = await this.latestCustomerMessage(conversationId);
       if (this.isHumanSupportRequest(latestMessage)) {
         await this.switchConversationToHuman(conversationId);
-        return "Sure. I will connect this chat to A'FRO support so a staff member can help you directly.";
+        return this.transferReply();
       }
 
-      return await this.fetchGeminiReply(conversationId);
+      const verified = await this.verifiedBotReply(conversationId, latestMessage);
+      if (verified) return verified;
+
+      return this.reply(await this.fetchGeminiReply(conversationId), this.generalActions());
     } catch (error) {
       if (
         error instanceof Error &&
         error.message === 'GEMINI_API_KEY is not configured'
       ) {
-        return this.createLocalSupportReply(conversationId);
+        return (await this.verifiedBotReply(conversationId, await this.latestCustomerMessage(conversationId)))
+          ?? this.reply('I can help with orders, payments, shipping, sizing, item condition, and AI Try-On. Please choose an option below.', this.generalActions());
       }
 
       console.error('[Gemini] Failed to create bot reply', {
         message: error instanceof Error ? error.message : String(error),
       });
 
-      return 'Sorry, I am having trouble answering right now. Please try again in a moment.';
+      return this.reply('Sorry, I am having trouble answering right now. Please try again in a moment.', this.generalActions());
     }
   }
 
@@ -494,10 +494,6 @@ export class ChatService {
         .find(
           (message) => message.senderId.toLowerCase() !== this.geminiBotUserId,
         )?.text ?? '';
-    const appContext = await this.botContextForConversation(
-      conversationId,
-      latestCustomerMessage,
-    );
     const contents = history.map((message) => ({
       role:
         message.senderId.toLowerCase() === this.geminiBotUserId
@@ -520,13 +516,8 @@ export class ChatService {
             parts: [
               {
                 text: [
-                  "You are AI Assistant for A'FRO Dry Goods. Be concise, friendly, and helpful about shopping, orders, sizing, returns, and product questions.",
-                  'Use the customer and store context below. If the customer gives a product ID or product name, answer from the matching product data. Do not ask for product details that are already present in the context.',
-                  appContext.user,
-                  appContext.products,
-                  appContext.orders,
-                  appContext.cart,
-                  appContext.saved,
+                  "You are AI Assistant for A'FRO Dry Goods. Be concise, friendly, and helpful.",
+                  'Do not state or infer business facts such as prices, stock, measurements, condition, order/payment status, shipping fees, delivery dates, couriers, or tracking details. Those are supplied by the application separately. For those topics, ask the customer to select a relevant option or offer human support.',
                 ].join('\n\n'),
               },
             ],
@@ -556,6 +547,449 @@ export class ChatService {
     }
 
     return text;
+  }
+
+  /**
+   * Business answers are intentionally resolved here, before Gemini is called.
+   * This keeps database/API data authoritative and lets Gemini remain a purely
+   * conversational fallback for non-transactional requests.
+   */
+  private async verifiedBotReply(conversationId: string, message: string): Promise<ChatbotReply | null> {
+    const text = message.toLowerCase();
+    const normalizedMessage = message.trim().toLowerCase();
+    const product = await this.conversationProduct(conversationId);
+    const selectedOrder = text.match(/\border ([a-f0-9]{8})\b/i)?.[1];
+    if (/^(talk to (an )?agent|contact support)$/i.test(message.trim())) {
+      await this.switchConversationToHuman(conversationId);
+      return this.transferReply();
+    }
+    if (normalizedMessage === 'delivery & shipping') {
+      return product
+        ? this.reply(`What would you like to check about shipping for ${product.name}?`, this.productShippingActions(product.id))
+        : this.reply('What would you like to check about delivery and shipping?', this.deliveryShippingActions());
+    }
+    if (normalizedMessage === 'shipping fee') {
+      return product
+        ? this.chooseProductOrderReply(conversationId, product.id, 'shipping')
+        : this.generalShippingRateReply(conversationId);
+    }
+    if (normalizedMessage === 'estimated delivery / tracking') {
+      return product
+        ? this.latestProductDeliveryReply(conversationId, product.id)
+        : this.generalDeliveryReply(conversationId);
+    }
+    // Keep this explicit so the product quick action can never fall through to
+    // the generic assistant menu.
+    if (product && normalizedMessage === 'view measurements') {
+      return this.productMeasurementsReply(product, text, conversationId);
+    }
+
+    const isProductQuestion = Boolean(product) && (
+      /^action:(measurements|sizes|sizing|condition|defects|availability|shipping|couriers|delivery|try-on|agent)$/i.test(message.trim()) ||
+      /\b(measurement|size|fit|condition|defect|flaw|stain|damage|stock|available|availability|shipping|courier|delivery|try.?on)\b/.test(text)
+    );
+
+    if (product && isProductQuestion) {
+      if (selectedOrder && /shipping fee/.test(text)) {
+        return this.shippingReply(conversationId, this.productShippingActions(product.id), selectedOrder);
+      }
+      if (selectedOrder && /estimated delivery|tracking/.test(text)) {
+        return this.deliveryReply(conversationId, this.productShippingActions(product.id), selectedOrder);
+      }
+      if (/^(shipping & delivery|check shipping|shipping)$/.test(normalizedMessage)) {
+        return this.reply(`What would you like to check about shipping for ${product.name}?`, this.productShippingActions(product.id));
+      }
+      if (normalizedMessage === 'available couriers') {
+        return this.reply('J&T Express is currently the available courier. More courier options are under development.', this.productShippingActions(product.id));
+      }
+      if (normalizedMessage === 'estimated delivery') {
+        return this.latestProductDeliveryReply(conversationId, product.id);
+      }
+      if (/defect|flaw|stain|damage/.test(text)) {
+        await this.switchConversationToHuman(conversationId);
+        return this.transferReply('I do not have verified detail about that physical condition. I’ll connect you with support so they can check the item.');
+      }
+      if (/condition/.test(text)) {
+        return this.reply('Detailed condition information for this item is being updated. A support agent can verify it for you.', this.productActions(product.id));
+      }
+      if (/stock|available|availability/.test(text)) {
+        return this.productAvailabilityReply(product, conversationId);
+      }
+      if (/measurements|size|fit/.test(text)) {
+        return this.productMeasurementsReply(product, text, conversationId);
+      }
+      if (/courier/.test(text)) {
+        return this.reply('J&T Express is currently the available courier. More courier options are under development.', this.productShippingActions(product.id));
+      }
+      if (/shipping|delivery/.test(text)) {
+        return this.reply(`What would you like to check about shipping for ${product.name}?`, this.productShippingActions(product.id));
+      }
+      if (/try.?on/.test(text)) {
+        return this.reply('I can open AI Try-On for this item. Upload a clear, good-quality photo and follow the instructions on the Try-On screen.', this.productActions(product.id), 'OPEN_TRY_ON');
+      }
+    }
+
+    if (/^my order$/i.test(message.trim())) return this.reply('What would you like to check?', [
+      { id: 'order-status', label: 'View Order Status', prompt: 'View Order Status' },
+      { id: 'order-details', label: 'Order Details', prompt: 'Order Details' },
+    ]);
+    if (/^payment$/i.test(message.trim())) return this.reply('What would you like to know about payment?', [
+      { id: 'payment-methods', label: 'Payment Methods', prompt: 'Payment Methods' },
+      { id: 'payment-status', label: 'Payment Status', prompt: 'Payment Status' },
+    ]);
+    if (/^ai try-on$/i.test(message.trim())) return this.reply('How can I help with AI Try-On?', [
+      { id: 'try-on-how', label: 'How to Use Try-On', prompt: 'How to Use Try-On' },
+      { id: 'try-on-upload', label: 'Upload Photo Help', prompt: 'Upload Photo Help' },
+      { id: 'try-on-problem', label: 'Try-On Not Working', prompt: 'Try-On Not Working' },
+    ]);
+    if (/^view order status$/i.test(message.trim())) return this.chooseOrderReply(conversationId, 'status');
+    if (/^order details$/i.test(message.trim())) return this.chooseOrderReply(conversationId, 'details');
+    if (/^payment status$/i.test(message.trim())) return this.chooseOrderReply(conversationId, 'payment');
+    if (/^payment methods$/i.test(message.trim())) return this.reply('GCash is currently supported. Additional payment methods may be added in a future update.', this.generalActions());
+    if (/^how to use try-on$/i.test(message.trim())) return this.reply('Open AI Try-On, choose an item, upload a clear good-quality photo, then follow the instructions on the Try-On screen.', this.generalActions());
+    if (/^upload photo help$/i.test(message.trim())) return this.reply('Use a clear, well-lit photo that follows the guidance shown on the Try-On screen. Avoid blurry or heavily cropped images.', this.generalActions());
+    if (/^try-on not working$/i.test(message.trim())) return this.reply('Restart the app, check your internet/Wi-Fi, make sure the image is good quality, then try again. If it continues, I can connect you with support.', [{ id: 'agent', label: 'Talk to an Agent', prompt: 'Talk to an Agent' }]);
+    if (selectedOrder) {
+      if (/status/.test(text)) return this.orderReply(conversationId, false, selectedOrder);
+      if (/detail/.test(text)) return this.orderReply(conversationId, false, selectedOrder, true);
+      if (/payment/.test(text)) return this.paymentReply(conversationId, selectedOrder);
+      if (/shipping fee/.test(text)) return this.shippingReply(conversationId, product ? this.productShippingActions(product.id) : this.deliveryShippingActions(), selectedOrder);
+      if (/estimated delivery|tracking/.test(text)) return this.deliveryReply(conversationId, product ? this.productShippingActions(product.id) : this.deliveryShippingActions(), selectedOrder);
+    }
+    if (/\b(order status|order details|payment status|shipping fee|shipping|delivery|tracking|track order|try.?on not working|upload photo)\b/.test(text)) {
+      if (/payment/.test(text)) return this.paymentReply(conversationId);
+      if (/shipping|delivery/.test(text)) return this.reply('What would you like to check about delivery and shipping?', this.deliveryShippingActions());
+      if (/tracking|track/.test(text)) return this.orderReply(conversationId, true);
+      if (/order/.test(text)) return this.orderReply(conversationId, false);
+      if (/try.?on.*(not working|problem)/.test(text)) {
+        return this.reply('Try restarting the app, checking your internet/Wi-Fi, and using a good-quality uploaded image. Then try again. If it still does not work, I can connect you with support.', this.generalActions());
+      }
+      if (/upload/.test(text)) return this.reply('For the best result, use the photo requirements and instructions shown on the Try-On screen. A clear, good-quality image works best.', this.generalActions());
+      if (/try.?on/.test(text)) return this.reply('Open AI Try-On, choose an item, upload your photo, then follow the instructions shown on that screen.', this.generalActions(), /start|open|action:try-on$/i.test(message) ? 'OPEN_TRY_ON' : undefined);
+    }
+    if (/\b(gc?ash|payment method)\b/.test(text)) return this.reply('GCash is currently supported. Additional payment methods may be added in a future update.', this.generalActions());
+    return null;
+  }
+
+  private reply(text: string, quickActions: ChatbotAction[] = [], action?: ChatbotAction['action']): ChatbotReply {
+    return { text, quickActions, action };
+  }
+
+  private generalActions(): ChatbotAction[] {
+    return [
+      { id: 'order', label: '📦 My Order', prompt: 'My Order' },
+      { id: 'payment', label: '💳 Payment', prompt: 'Payment' },
+      { id: 'shipping-delivery', label: '🚚 Shipping & Delivery', prompt: 'Shipping & Delivery' },
+      { id: 'try-on', label: '👕 AI Try-On', prompt: 'AI Try-On' },
+      { id: 'agent', label: '👨‍💼 Talk to an Agent', prompt: 'Talk to an Agent' },
+    ];
+  }
+
+  private deliveryShippingActions(): ChatbotAction[] {
+    return [
+      { id: 'shipping-fee', label: 'Shipping Fee', prompt: 'Shipping Fee' },
+      { id: 'delivery-tracking', label: 'Estimated Delivery / Tracking', prompt: 'Estimated Delivery / Tracking' },
+      { id: 'agent', label: '👨‍💼 Talk to an Agent', prompt: 'Talk to an Agent' },
+    ];
+  }
+
+  private productActions(productId: string): ChatbotAction[] {
+    return [
+      { id: 'measurements', label: '📏 View Measurements', prompt: 'View Measurements' },
+      { id: 'availability', label: '📦 Check Stock', prompt: 'Check Stock' },
+      { id: 'try-on', label: '👕 Try It On', prompt: 'Start AI Try-On' },
+      { id: 'shipping', label: '🚚 Shipping & Delivery', prompt: 'Shipping & Delivery' },
+      { id: 'agent', label: '👨‍💼 Talk to an Agent', prompt: 'Talk to an Agent' },
+    ];
+  }
+
+  private productShippingActions(productId: string): ChatbotAction[] {
+    return [
+      { id: 'shipping-fee', label: 'Shipping Fee', prompt: 'Shipping Fee' },
+      { id: 'couriers', label: 'Available Couriers', prompt: 'Available Couriers' },
+      { id: 'estimated-delivery', label: 'Estimated Delivery', prompt: 'Estimated Delivery' },
+      { id: 'agent', label: '👨‍💼 Talk to an Agent', prompt: 'Talk to an Agent' },
+    ];
+  }
+
+  private shippingRateLocations(province: string) {
+    const locations = [province].map((value) => value.trim()).filter(Boolean);
+    const normalized = new Set(locations.map((value) => value.toLowerCase()));
+    if (normalized.has('metro manila') || normalized.has('ncr') || normalized.has('national capital region')) {
+      locations.push('Metro Manila', 'NCR', 'National Capital Region');
+    }
+    return [...new Set(locations)];
+  }
+
+  private transferReply(text = "Sure. I will connect this chat to A'FRO support so a staff member can help you directly."): ChatbotReply {
+    return this.reply(text, [], 'TRANSFER_TO_AGENT');
+  }
+
+  private async conversationProduct(conversationId: string) {
+    const [hasAvailabilityStatus, hasReservedFlag] = await Promise.all([
+      this.databaseService.columnExists('PRODUCTS', 'availability_status'),
+      this.databaseService.columnExists('PRODUCTS', 'is_reserved'),
+    ]);
+    const rows = await this.databaseService.request<{ id: string; name: string; size: string | null; stock: number; availabilityStatus: string | null; isReserved: boolean | number | null }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId).query(`
+        SELECT TOP 1 CONVERT(varchar(36), p.product_id) AS id, p.name,
+          (SELECT TOP 1 ss.label FROM PRODUCT_SIZE_STOCK pss INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pss.size_id WHERE pss.product_id = p.product_id ORDER BY pss.stock_qty DESC) AS size,
+          CAST(COALESCE((SELECT SUM(CASE WHEN stock_qty > 0 THEN stock_qty ELSE 0 END) FROM PRODUCT_SIZE_STOCK WHERE product_id = p.product_id), p.stock_qty, 0) AS int) AS stock,
+          ${hasAvailabilityStatus ? 'p.availability_status' : 'NULL'} AS availabilityStatus,
+          ${hasReservedFlag ? 'p.is_reserved' : 'CAST(0 AS bit)'} AS isReserved
+        FROM CONVERSATIONS c INNER JOIN PRODUCTS p ON p.product_id = c.product_id
+        WHERE c.convo_id = @conversationId
+      `));
+    return rows[0] ?? null;
+  }
+
+  private async productAvailabilityReply(product: { id: string; name: string }, conversationId: string): Promise<ChatbotReply> {
+    const current = await this.conversationProduct(conversationId);
+    if (!current) return this.reply('That product is no longer available. A support agent can help you find an alternative.', this.generalActions());
+    const state = String(current.availabilityStatus ?? '').toUpperCase() === 'RESERVED' || Boolean(current.isReserved)
+      ? 'RESERVED'
+      : Number(current.stock) > 0 ? 'AVAILABLE' : 'SOLD';
+    const copy = state === 'AVAILABLE'
+      ? `${current.name} is currently available.`
+      : state === 'RESERVED'
+        ? `${current.name} is currently reserved.`
+        : `${current.name} is currently sold out.`;
+    return this.reply(copy, this.productActions(product.id));
+  }
+
+  private async productMeasurementsReply(product: { id: string; name: string; size: string | null }, text: string, conversationId: string): Promise<ChatbotReply> {
+    const [rows, profileRows] = await Promise.all([
+      this.databaseService.request<{ size: string; name: string; value: number }>((request) => request
+        .input('productId', sql.UniqueIdentifier, product.id).query(`
+        SELECT ss.label AS size, pm.measurement_name AS name, CAST(pm.value_cm AS float) AS value
+        FROM PRODUCT_MEASUREMENTS pm INNER JOIN SIZE_STANDARDS ss ON ss.size_id = pm.size_id
+        WHERE pm.product_id = @productId ORDER BY ss.sort_order, pm.measurement_name
+      `)),
+      this.databaseService.request<{ chest: number | null; waist: number | null; hip: number | null }>((request) => request
+        .input('conversationId', sql.UniqueIdentifier, conversationId).query(`
+          SELECT TOP 1
+            CAST(u.body_chest_cm AS float) AS chest,
+            CAST(u.body_waist_cm AS float) AS waist,
+            CAST(u.body_hip_cm AS float) AS hip
+          FROM CONVERSATIONS c
+          INNER JOIN USERS u ON u.user_id = c.buyer_id
+          WHERE c.convo_id = @conversationId
+        `)),
+    ]);
+    if (!rows.length) return this.reply(`Measurements for ${product.name} are not available yet. I can connect you with support for help.`, this.productActions(product.id));
+    const details = rows.map((row) => `${row.size} ${row.name}: ${row.value} cm`).join(', ');
+    const profile = profileRows[0];
+    const savedMeasurements: Array<[string, number]> = [
+      ['chest', Number(profile?.chest)],
+      ['waist', Number(profile?.waist)],
+      ['hip', Number(profile?.hip)],
+    ];
+    const userMeasurements = new Map<string, number>(
+      savedMeasurements.filter(([, value]) => Number.isFinite(value) && value > 0),
+    );
+    const comparisons = rows.flatMap((row) => {
+      const key = ['chest', 'waist', 'hip'].find((name) => row.name.toLowerCase().includes(name));
+      const bodyValue = key ? userMeasurements.get(key) : undefined;
+      if (!key || bodyValue === undefined) return [];
+      const difference = Number(row.value) - bodyValue;
+      return [`${key[0].toUpperCase()}${key.slice(1)}: garment ${row.value} cm vs your saved ${bodyValue} cm (${difference >= 0 ? '+' : ''}${difference.toFixed(1)} cm)`];
+    });
+    const comparisonText = comparisons.length ? ` Comparison with your saved measurements: ${comparisons.join('; ')}.` : ' Your saved chest, waist, or hip measurements are not available for a direct comparison.';
+    return this.reply(`${product.name}${product.size ? ` (${product.size})` : ''}: ${details}.${comparisonText} Measurements are a guide only and do not guarantee fit.`, this.productActions(product.id));
+  }
+
+  private async chooseOrderReply(conversationId: string, purpose: 'status' | 'details' | 'payment'): Promise<ChatbotReply> {
+    const rows = await this.databaseService.request<{ id: string; status: string }>((request) => request.input('conversationId', sql.UniqueIdentifier, conversationId).query(`
+      SELECT TOP 10 CONVERT(varchar(36), o.order_id) AS id, os.label AS status
+      FROM CONVERSATIONS c INNER JOIN ORDERS o ON o.user_id = c.buyer_id INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+      WHERE c.convo_id = @conversationId ORDER BY o.placed_at DESC
+    `));
+    if (!rows.length) return this.reply('I could not find any orders on your account. Please contact support if you need help.', this.generalActions());
+    const verb = purpose === 'status' ? 'View status for' : purpose === 'details' ? 'View details for' : 'Check payment for';
+    return this.reply('Select an order to continue.', rows.map((order) => ({ id: `${purpose}-${order.id}`, label: `Order #${order.id.slice(0, 8).toUpperCase()} · ${order.status}`, prompt: `${verb} order ${order.id.slice(0, 8).toUpperCase()}` })));
+  }
+
+  private async chooseProductOrderReply(conversationId: string, productId: string, purpose: 'shipping' | 'delivery'): Promise<ChatbotReply> {
+    const rows = await this.databaseService.request<{ id: string; status: string }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId)
+      .input('productId', sql.UniqueIdentifier, productId).query(`
+        SELECT TOP 10 CONVERT(varchar(36), o.order_id) AS id, os.label AS status
+        FROM CONVERSATIONS c
+        INNER JOIN ORDERS o ON o.user_id = c.buyer_id
+        INNER JOIN ORDER_ITEMS oi ON oi.order_id = o.order_id AND oi.product_id = @productId
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE c.convo_id = @conversationId
+          AND LOWER(os.label) NOT LIKE '%cancel%'
+          AND LOWER(os.label) NOT LIKE '%deliver%'
+        ORDER BY o.updated_at DESC, o.placed_at DESC
+      `));
+    if (!rows.length) return this.reply('I could not find an active order for this item. Shipping and tracking details will be available after an order is placed and processed.', this.productShippingActions(productId));
+    const prompt = purpose === 'shipping' ? 'Shipping Fee for order' : 'Estimated Delivery for order';
+    return this.reply('Select an active order to continue.', rows.map((order) => ({
+      id: `${purpose}-${order.id}`,
+      label: `Order #${order.id.slice(0, 8).toUpperCase()} · ${order.status}`,
+      prompt: `${prompt} ${order.id.slice(0, 8).toUpperCase()}`,
+    })));
+  }
+
+  private async latestProductDeliveryReply(conversationId: string, productId: string): Promise<ChatbotReply> {
+    const rows = await this.databaseService.request<{ id: string }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId)
+      .input('productId', sql.UniqueIdentifier, productId).query(`
+        SELECT TOP 1 CONVERT(varchar(36), o.order_id) AS id
+        FROM CONVERSATIONS c
+        INNER JOIN ORDERS o ON o.user_id = c.buyer_id
+        INNER JOIN ORDER_ITEMS oi ON oi.order_id = o.order_id AND oi.product_id = @productId
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE c.convo_id = @conversationId
+          AND LOWER(os.label) NOT LIKE '%cancel%'
+          AND LOWER(os.label) NOT LIKE '%deliver%'
+        ORDER BY o.updated_at DESC, o.placed_at DESC
+      `));
+    if (!rows[0]) return this.reply('I could not find an active order for this item. Estimated delivery becomes available after the order is processed.', this.productShippingActions(productId));
+    return this.deliveryReply(conversationId, this.productShippingActions(productId), rows[0].id);
+  }
+
+  private async orderReply(conversationId: string, tracking: boolean, orderShort?: string, details = false): Promise<ChatbotReply> {
+    const hasTrackingNumber = await this.databaseService.columnExists('ORDERS', 'tracking_number');
+    const rows = await this.databaseService.request<{ id: string; status: string; tracking: string | null; total: number }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId)
+      .input('orderShort', sql.NVarChar(8), orderShort?.toLowerCase() ?? null).query(`
+        SELECT TOP 1 CONVERT(varchar(36), o.order_id) AS id, os.label AS status,
+          ${hasTrackingNumber ? 'o.tracking_number' : 'NULL'} AS tracking, CAST(o.total_amount AS float) AS total
+        FROM CONVERSATIONS c INNER JOIN ORDERS o ON o.user_id = c.buyer_id INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE c.convo_id = @conversationId
+          AND (@orderShort IS NULL OR LEFT(CONVERT(varchar(36), o.order_id), 8) = LOWER(@orderShort))
+        ORDER BY o.placed_at DESC
+      `));
+    const order = rows[0];
+    if (!order) return this.reply('I could not find an order on your account. Please contact support if you need help.', this.generalActions());
+    if (tracking && !order.tracking) return this.reply(`Your order ${order.id.slice(0, 8).toUpperCase()} is ${order.status}. Tracking is not available yet.`, this.generalActions());
+    const orderSummary = details ? `Order ${order.id.slice(0, 8).toUpperCase()} is ${order.status}. Total: ${this.formatPeso(order.total)}.${order.tracking ? ` Tracking number: ${order.tracking}.` : ''}` : `Your order ${order.id.slice(0, 8).toUpperCase()} is ${order.status}.${order.tracking ? ` Tracking number: ${order.tracking}.` : ''}`;
+    return { ...this.reply(orderSummary, this.generalActions(), tracking ? 'OPEN_TRACKING' : undefined), orderId: order.id };
+  }
+
+  private async paymentReply(conversationId: string, orderShort?: string): Promise<ChatbotReply> {
+    // PAYMENT records are not part of the current schema; do not infer a status from an order.
+    await this.latestCustomerMessage(conversationId);
+    return this.reply(orderShort ? `Payment verification for order ${orderShort.toUpperCase()} is not available yet. Please contact support so they can verify your GCash payment.` : 'Choose Payment Status to select an order. Payment verification is handled by support.', this.generalActions());
+  }
+
+  private async generalShippingRateReply(conversationId: string): Promise<ChatbotReply> {
+    const addressRows = await this.databaseService.request<{ province: string | null }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId).query(`
+        SELECT TOP 1 address.province
+        FROM CONVERSATIONS c
+        OUTER APPLY (
+          SELECT TOP 1 province FROM USER_ADDRESSES
+          WHERE user_id = c.buyer_id
+          ORDER BY is_default DESC, created_at DESC
+        ) address
+        WHERE c.convo_id = @conversationId
+      `));
+    const province = addressRows[0]?.province?.trim() ?? '';
+    if (!province) return this.reply('Add a registered delivery address first so I can show the shipping rate for your area.', this.deliveryShippingActions());
+
+    const locations = this.shippingRateLocations(province);
+    const rateRows = await this.databaseService.request<{ shippingFee: number }>((request) => request
+      .input('locations', sql.NVarChar(sql.MAX), JSON.stringify(locations)).query(`
+        SELECT TOP 1 CAST(base_fee AS float) AS shippingFee
+        FROM SHIPPING_RATES
+        WHERE is_active = 1
+          AND LOWER(LTRIM(RTRIM(destination_province))) IN (
+            SELECT LOWER(LTRIM(RTRIM([value]))) FROM OPENJSON(@locations)
+          )
+        ORDER BY CASE
+          WHEN LOWER(LTRIM(RTRIM(destination_province))) = LOWER(LTRIM(RTRIM(JSON_VALUE(@locations, '$[0]')))) THEN 0
+          ELSE 1
+        END
+      `));
+    const fee = rateRows[0]?.shippingFee;
+    if (fee === undefined) return this.reply(`No active shipping rate is currently available for your registered area, ${province}. Please contact support for help.`, this.deliveryShippingActions());
+    return this.reply(`Your registered delivery area is ${province}. The current base shipping rate for your area is ${this.formatPeso(fee)}. Your final fee is confirmed at checkout for the selected cart.`, this.deliveryShippingActions());
+  }
+
+  private async generalDeliveryReply(conversationId: string): Promise<ChatbotReply> {
+    const rows = await this.databaseService.request<{ id: string; status: string }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId).query(`
+        SELECT TOP 10 CONVERT(varchar(36), o.order_id) AS id, os.label AS status
+        FROM CONVERSATIONS c
+        INNER JOIN ORDERS o ON o.user_id = c.buyer_id
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE c.convo_id = @conversationId
+          AND LOWER(os.label) NOT LIKE '%cancel%'
+          AND LOWER(os.label) NOT LIKE '%deliver%'
+        ORDER BY o.updated_at DESC, o.placed_at DESC
+      `));
+    const defaultReply = 'Delivery usually takes up to two weeks from order processing. If your delivery goes beyond this timeline, please talk to an agent so we can look into the concern.';
+    if (!rows.length) return this.reply(defaultReply, this.deliveryShippingActions());
+    return this.reply(`${defaultReply} Do you have an order you want to check for an estimated delivery?`, rows.map((order) => ({
+      id: `delivery-${order.id}`,
+      label: `Order #${order.id.slice(0, 8).toUpperCase()} · ${order.status}`,
+      prompt: `Estimated Delivery / Tracking for order ${order.id.slice(0, 8).toUpperCase()}`,
+    })));
+  }
+
+  private async shippingReply(conversationId: string, followUpActions = this.generalActions(), orderShort?: string): Promise<ChatbotReply> {
+    const [hasShippingFee, hasExpectedDelivery] = await Promise.all([
+      this.databaseService.columnExists('ORDERS', 'shipping_fee'),
+      this.databaseService.columnExists('ORDERS', 'expected_delivery_at'),
+    ]);
+    const rows = await this.databaseService.request<{ id: string; shippingFee: number | null; status: string; expectedDeliveryAt: Date | null }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId)
+      .input('orderShort', sql.NVarChar(8), orderShort?.toLowerCase() ?? null).query(`
+        SELECT TOP 1 CONVERT(varchar(36), o.order_id) AS id, ${hasShippingFee ? 'CAST(o.shipping_fee AS float)' : 'NULL'} AS shippingFee,
+          os.label AS status, ${hasExpectedDelivery ? 'o.expected_delivery_at' : 'NULL'} AS expectedDeliveryAt
+        FROM CONVERSATIONS c INNER JOIN ORDERS o ON o.user_id = c.buyer_id
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE c.convo_id = @conversationId
+          AND (@orderShort IS NULL OR LEFT(CONVERT(varchar(36), o.order_id), 8) = LOWER(@orderShort))
+        ORDER BY o.placed_at DESC
+      `));
+    const order = rows[0];
+    if (!order) return this.reply('Your shipping fee is calculated securely at checkout from your selected province and the complete cart. It is not a flat fee.', followUpActions);
+    return this.reply(`For order ${order.id.slice(0, 8).toUpperCase()}, the shipping fee is ${this.formatPeso(order.shippingFee ?? 0)}.`, followUpActions);
+  }
+
+  private async deliveryReply(conversationId: string, followUpActions = this.generalActions(), orderShort?: string): Promise<ChatbotReply> {
+    const [hasExpectedDelivery, hasTrackingNumber, hasTrackingUrl] = await Promise.all([
+      this.databaseService.columnExists('ORDERS', 'expected_delivery_at'),
+      this.databaseService.columnExists('ORDERS', 'tracking_number'),
+      this.databaseService.columnExists('ORDERS', 'tracking_url'),
+    ]);
+    const rows = await this.databaseService.request<{ id: string; status: string; expectedDeliveryAt: Date | null; trackingNumber: string | null; trackingUrl: string | null }>((request) => request
+      .input('conversationId', sql.UniqueIdentifier, conversationId)
+      .input('orderShort', sql.NVarChar(8), orderShort?.toLowerCase() ?? null).query(`
+        SELECT TOP 1 CONVERT(varchar(36), o.order_id) AS id, os.label AS status,
+          ${hasExpectedDelivery ? 'o.expected_delivery_at' : 'NULL'} AS expectedDeliveryAt,
+          ${hasTrackingNumber ? 'o.tracking_number' : 'NULL'} AS trackingNumber,
+          ${hasTrackingUrl ? 'o.tracking_url' : 'NULL'} AS trackingUrl
+        FROM CONVERSATIONS c INNER JOIN ORDERS o ON o.user_id = c.buyer_id
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE c.convo_id = @conversationId
+          AND (@orderShort IS NULL OR LEFT(CONVERT(varchar(36), o.order_id), 8) = LOWER(@orderShort))
+        ORDER BY o.placed_at DESC
+      `));
+    const order = rows[0];
+    if (!order) return this.reply('Estimated delivery and tracking become available after an order is placed and processed. You can check your order page once you have an order.', followUpActions);
+
+    const normalizedStatus = order.status.trim().toLowerCase();
+    const isReadyToShip = normalizedStatus.includes('ready to ship');
+    const isInTransit = normalizedStatus.includes('in transit');
+    const expected = (isReadyToShip || isInTransit) && order.expectedDeliveryAt
+      ? ` Estimated delivery: ${new Intl.DateTimeFormat('en-PH', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'Asia/Manila' }).format(new Date(order.expectedDeliveryAt))}.`
+      : isReadyToShip || isInTransit
+        ? ' An estimated delivery date is not available yet.'
+        : ' The estimated delivery date will be available once this order is Ready To Ship.';
+    const tracking = isInTransit
+      ? order.trackingNumber ? ` Tracking number: ${order.trackingNumber}.` : ' Tracking is not available yet.'
+      : '';
+    const validTrackingUrl = isInTransit && order.trackingUrl && /^https?:\/\//i.test(order.trackingUrl) ? order.trackingUrl : null;
+    const link = validTrackingUrl ? ` Tracking link: ${validTrackingUrl}` : '';
+    return {
+      ...this.reply(`Order ${order.id.slice(0, 8).toUpperCase()} is ${order.status}.${expected}${tracking}${link}`, followUpActions),
+      orderId: order.id,
+    };
   }
 
   private async orderContextForConversation(conversationId: string) {

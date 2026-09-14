@@ -15,6 +15,8 @@ const initialForm = {
   name: "",
   description: "",
   brand: "",
+  styleId: "",
+  customStyle: "",
   categoryId: "",
   genderId: "",
   sizeId: "",
@@ -25,6 +27,8 @@ const initialForm = {
   colorHex: "",
   price: "",
   quantity: "1",
+  weightKg: "",
+  bulkUnits: "",
   images: [],
   isActive: true,
 };
@@ -38,6 +42,7 @@ export default function ProductsAdd() {
     garmentTypes: [],
     genders: [],
     colors: [],
+    fashionStyles: [],
   });
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -70,6 +75,12 @@ export default function ProductsAdd() {
     }
     if (!Number.isInteger(quantity) || quantity < 0) {
       return "Quantity must be zero or greater.";
+    }
+    if (form.weightKg !== "" && (!Number.isFinite(Number(form.weightKg)) || Number(form.weightKg) < 0)) {
+      return "Shipping weight must be zero or greater.";
+    }
+    if (form.bulkUnits !== "" && (!Number.isFinite(Number(form.bulkUnits)) || Number(form.bulkUnits) < 0)) {
+      return "Shipping bulk must be zero or greater.";
     }
     if (form.brand.trim().length > 100) {
       return "Brand must be 100 characters or less.";
@@ -151,6 +162,8 @@ export default function ProductsAdd() {
     colorHex: selectedColor?.hex ?? form.colorHex ?? null,
     price: Number(form.price),
     quantity: Number(form.quantity),
+    weightKg: form.weightKg === "" ? null : Number(form.weightKg),
+    bulkUnits: form.bulkUnits === "" ? null : Number(form.bulkUnits),
     imageUrls: form.images.map((image) => image.imageUrl),
     isActive: form.isActive,
   });
@@ -246,6 +259,34 @@ export default function ProductsAdd() {
               <MdKeyboardArrowDown size={20} />
             </label>
           </div>
+
+          <div className="product-add-row">
+            <label className="product-add-field">
+              <span>Shipping Weight (kg)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.001"
+                value={form.weightKg}
+                onChange={(e) => updateField("weightKg", e.target.value)}
+                placeholder="Uses category default if blank"
+              />
+            </label>
+
+            <label className="product-add-field">
+              <span>Shipping Bulk Units</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.bulkUnits}
+                onChange={(e) => updateField("bulkUnits", e.target.value)}
+                placeholder="Uses category default if blank"
+              />
+            </label>
+            <label className="product-add-field product-add-select"><span>Fashion Style</span><select value={form.styleId} onChange={(e) => updateField("styleId", e.target.value)}><option value="">No style assigned</option>{lookups.fashionStyles.map((style) => <option key={style.id} value={style.id}>{style.label}</option>)}</select><MdKeyboardArrowDown size={20} /></label>
+          </div>
+          <label className="product-add-field"><span>Custom Fashion Style (optional)</span><input value={form.customStyle} onChange={(e) => updateField("customStyle", e.target.value.slice(0, 100))} placeholder="Creates or reuses this style" maxLength={100} /></label>
 
           <div className="product-add-row">
             <label className="product-add-field product-add-select">

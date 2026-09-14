@@ -9,8 +9,8 @@ import {
 import "./Orders.css";
 
 const TABS = ["All Orders", "Shipping", "Completed", "Cancel"];
-const ORDER_STATUSES = ["Order Placed", "Order Confirmed", "Order Processed", "Ready to Ship", "Delivered", "Cancelled"];
-const SHIPPING_STATUSES = ["order placed", "order confirmed", "order processed", "ready to ship", "confirmed", "shipped", "shipping"];
+const ORDER_STATUSES = ["Order Placed", "Payment Confirmed", "Order Confirmed", "Order Processed", "Ready to Ship", "In Transit", "Out for Delivery", "Delivered", "Cancelled"];
+const SHIPPING_STATUSES = ["order placed", "order confirmed", "order processed", "ready to ship", "in transit", "out for delivery", "confirmed", "shipped", "shipping"];
 const PAGE_SIZE = 10;
 
 export default function Orders() {
@@ -28,6 +28,10 @@ export default function Orders() {
   const [selectedOrderItems, setSelectedOrderItems] = useState({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [detailOrder, setDetailOrder] = useState(null);
+  const [trackingDrafts, setTrackingDrafts] = useState({});
+  const [cancelOrder, setCancelOrder] = useState(null);
+  const [cancellationReason, setCancellationReason] = useState('');
 
   useEffect(() => {
     apiGet("/admin/orders")
@@ -77,11 +81,60 @@ export default function Orders() {
     setOrders((current) => current.map((order) => (order.id === orderId ? { ...order, status } : order)));
 
     try {
-      await apiPatch(`/admin/orders/${orderId}/status`, { status });
+      const draft = trackingDrafts[orderId] ?? {};
+      await apiPatch(`/admin/orders/${orderId}/status`, { status, trackingNumber: draft.trackingNumber, trackingUrl: draft.trackingUrl });
+      return true;
     } catch (err) {
       setOrders(previousOrders);
       setError(err.message);
+      return false;
     }
+  };
+
+  const handleStatusSelect = (orderId, status) => {
+    setError("");
+    if (status === "In Transit") {
+      setOrders((current) => current.map((order) => (order.id === orderId ? { ...order, status } : order)));
+      return;
+    }
+    if (status === 'Cancelled') { setCancelOrder(orderId); setCancellationReason(''); return; }
+    void handleStatusChange(orderId, status);
+  };
+
+  const confirmPayment = async (order) => {
+    if (!window.confirm(`Confirm the payment for order ${order.id}?`)) return;
+    setError("");
+    try {
+      await apiPatch(`/admin/orders/${order.id}/status`, { status: "Payment Confirmed" });
+      setOrders((current) => current.map((item) => item.id === order.id
+        ? { ...item, payment: "Confirmed", status: "Payment Confirmed" }
+        : item));
+      setDetailOrder((current) => current?.id === order.id
+        ? { ...current, payment: "Confirmed", status: "Payment Confirmed" }
+        : current);
+    } catch (err) {
+      setError(err.message || "Could not confirm this payment.");
+    }
+  };
+
+  const confirmCancellation = async () => {
+    if (!cancellationReason.trim()) { setError('Enter a cancellation reason.'); return; }
+    const saved = await apiPatch(`/admin/orders/${cancelOrder}/status`, { status: 'Cancelled', cancellationReason });
+    if (saved) { setOrders((current) => current.map((order) => order.id === cancelOrder ? { ...order, status: 'Cancelled' } : order)); setCancelOrder(null); }
+  };
+
+  const saveTracking = async (orderId) => {
+    const order = orders.find((item) => item.id === orderId);
+    const draft = trackingDrafts[orderId] ?? {};
+    const trackingNumber = draft.trackingNumber ?? order?.trackingNumber ?? '';
+    const trackingUrl = draft.trackingUrl ?? order?.trackingUrl ?? '';
+    if (!trackingNumber.trim() || !trackingUrl.trim()) {
+      setError("Enter both the tracking number and tracking link before saving.");
+      return;
+    }
+    setTrackingDrafts((current) => ({ ...current, [orderId]: { trackingNumber, trackingUrl } }));
+    const saved = await handleStatusChange(orderId, "In Transit");
+    if (saved) setOrders((current) => current.map((item) => item.id === orderId ? { ...item, trackingNumber, trackingUrl, status: 'In Transit' } : item));
   };
 
   const handleOrderItemSelect = (orderId, orderItemId) => {
@@ -137,7 +190,7 @@ export default function Orders() {
         {isLoading && <p className="table-state">Loading orders...</p>}
         {error && <p className="table-state table-state--error">{error}</p>}
 
-        {!isLoading && !error && <table className="orders-table">
+        {!isLoading && <table className="orders-table">
           <thead>
             <tr>
               <th><input type="checkbox" onChange={toggleAll} checked={selected.length === paginated.length && paginated.length > 0} /></th>
@@ -194,24 +247,38 @@ export default function Orders() {
                 <td>{formatPeso(order.price)}</td>
                 <td className="date-cell">{formatDate(order.date)}</td>
                 <td>
-                  <span className={`status-badge ${order.payment === "Paid" ? "payment-paid" : "payment-unpaid"}`}>
-                    {order.payment}
-                  </span>
+                  <div className="payment-verification">
+                    <span className={`status-badge ${order.payment === "Confirmed" ? "payment-paid" : "payment-unpaid"}`}>
+                      {order.payment}
+                    </span>
+                    {order.payment === "Pending verification" ? (
+                      <button className="payment-verify-button" type="button" onClick={() => void confirmPayment(order)}>
+                        Verify
+                      </button>
+                    ) : null}
+                  </div>
                 </td>
                 <td>
                   <select
                     className={`status-select status-${order.status?.toLowerCase().replaceAll(" ", "-")}`}
                     value={order.status}
-                    onChange={(event) => handleStatusChange(order.id, event.target.value)}
+                    onChange={(event) => handleStatusSelect(order.id, event.target.value)}
                   >
                     {ORDER_STATUSES.map((status) => (
                       <option key={status} value={status}>{status}</option>
                     ))}
                   </select>
+                  {order.status === "In Transit" ? (
+                    <div className="tracking-fields">
+                      <input placeholder="J&T tracking ID" value={trackingDrafts[order.id]?.trackingNumber ?? order.trackingNumber ?? ""} onChange={(event) => setTrackingDrafts((current) => ({ ...current, [order.id]: { ...current[order.id], trackingNumber: event.target.value } }))} />
+                      <input placeholder="https://www.jtexpress.ph/..." value={trackingDrafts[order.id]?.trackingUrl ?? order.trackingUrl ?? ""} onChange={(event) => setTrackingDrafts((current) => ({ ...current, [order.id]: { ...current[order.id], trackingUrl: event.target.value } }))} />
+                      <button className="tracking-save-button" type="button" onClick={() => saveTracking(order.id)}>{order.trackingNumber && order.trackingUrl ? 'Edit Tracking' : 'Save Tracking'}</button>
+                    </div>
+                  ) : null}
                 </td>
                 <td>
                   <div className="action-btns">
-                    <button className="action-btn" title="View"><MdVisibility size={17} /></button>
+                    <button className="action-btn" title="View" onClick={() => setDetailOrder(order)}><MdVisibility size={17} /></button>
                     <button className="action-btn" title="Edit"><MdEdit size={17} /></button>
                     <button className="action-btn action-btn--delete" title="Delete" onClick={() => setDeleteId(order.id)}><MdDelete size={17} /></button>
                   </div>
@@ -260,6 +327,22 @@ export default function Orders() {
               <button className="btn-outline" onClick={() => setDeleteId(null)}>Cancel</button>
               <button className="btn-danger" onClick={() => setDeleteId(null)}>Delete</button>
             </div>
+          </div>
+        </div>
+      )}
+      {cancelOrder && <div className="modal-overlay" onClick={() => setCancelOrder(null)}><div className="modal" onClick={(event) => event.stopPropagation()}><h3>Cancel order</h3><p>Tell the customer why this order is being cancelled.</p><textarea className="cancellation-reason" value={cancellationReason} onChange={(event) => setCancellationReason(event.target.value)} placeholder="Cancellation reason" /><div className="modal-actions"><button className="btn-outline" onClick={() => setCancelOrder(null)}>Back</button><button className="btn-danger" onClick={() => void confirmCancellation()}>Cancel order</button></div></div></div>}
+      {detailOrder && (
+        <div className="modal-overlay" onClick={() => setDetailOrder(null)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <h3>Order details</h3>
+            <p><strong>Customer:</strong> {detailOrder.customer}</p>
+            <p><strong>Payment:</strong> {detailOrder.payment} {detailOrder.paymentReference ? `(${detailOrder.paymentReference})` : ''}</p>
+            {detailOrder.payment === "Pending verification" ? <button className="tracking-save-button" type="button" onClick={() => void confirmPayment(detailOrder)}>Confirm payment</button> : null}
+            <p><strong>Status:</strong> {detailOrder.status}</p>
+            {detailOrder.trackingNumber ? <p><strong>Tracking:</strong> {detailOrder.trackingNumber}</p> : null}
+            {detailOrder.trackingUrl ? <p><a href={detailOrder.trackingUrl} target="_blank" rel="noreferrer">Open J&T tracking</a></p> : null}
+            {detailOrder.receiptUrl ? <p><a href={imageUrl(detailOrder.receiptUrl)} target="_blank" rel="noreferrer">View uploaded GCash receipt</a></p> : null}
+            <div className="modal-actions"><button className="btn-outline" onClick={() => setDetailOrder(null)}>Close</button></div>
           </div>
         </div>
       )}

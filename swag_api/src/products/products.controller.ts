@@ -8,6 +8,7 @@ import {
   Delete,
   Query,
   UploadedFiles,
+  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
@@ -16,6 +17,7 @@ import { extname } from 'path';
 import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { AdminGuard } from '../common/session-auth';
 
 type UploadedProductFile = {
   filename: string;
@@ -28,11 +30,13 @@ export class ProductsController {
   constructor(private readonly productsService: ProductsService) {}
 
   @Post()
+  @UseGuards(AdminGuard)
   create(@Body() createProductDto: CreateProductDto) {
     return this.productsService.create(createProductDto);
   }
 
   @Post('uploads')
+  @UseGuards(AdminGuard)
   @UseInterceptors(
     FilesInterceptor('images', 4, {
       storage: diskStorage({
@@ -83,11 +87,13 @@ export class ProductsController {
   }
 
   @Patch(':id')
+  @UseGuards(AdminGuard)
   update(@Param('id') id: string, @Body() updateProductDto: UpdateProductDto) {
     return this.productsService.update(id, updateProductDto);
   }
 
   @Delete(':id')
+  @UseGuards(AdminGuard)
   remove(@Param('id') id: string) {
     return this.productsService.remove(id);
   }

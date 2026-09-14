@@ -50,6 +50,7 @@ export class ProfileService {
     const hasPaymentReference = await this.databaseService.columnExists('ORDERS', 'payment_reference_number');
     const hasReceiptUrl = await this.databaseService.columnExists('ORDERS', 'payment_receipt_url');
     const hasTrackingNumber = await this.databaseService.columnExists('ORDERS', 'tracking_number');
+    const hasTrackingUrl = await this.databaseService.columnExists('ORDERS', 'tracking_url');
     const hasExpectedDelivery = await this.databaseService.columnExists('ORDERS', 'expected_delivery_at');
 
     return this.databaseService.request((request) =>
@@ -64,6 +65,7 @@ export class ProfileService {
           ${hasPaymentReference ? 'o.payment_reference_number' : 'NULL'} AS paymentReferenceNumber,
           ${hasReceiptUrl ? 'o.payment_receipt_url' : 'NULL'} AS paymentReceiptUrl,
           ${hasTrackingNumber ? 'o.tracking_number' : "CONCAT('AFD', FORMAT(o.placed_at, 'yyyyMMdd'), LEFT(CONVERT(varchar(36), o.order_id), 8))"} AS trackingNumber,
+          ${hasTrackingUrl ? 'o.tracking_url' : 'NULL'} AS trackingUrl,
           ${hasExpectedDelivery ? 'o.expected_delivery_at' : 'DATEADD(day, 7, o.placed_at)'} AS expectedDeliveryAt,
           os.label AS status,
           CONVERT(varchar(36), oi.order_item_id) AS orderItemId,

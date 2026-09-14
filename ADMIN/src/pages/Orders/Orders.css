@@ -451,6 +451,34 @@
   color: #c62828;
 }
 
+.payment-verification {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+}
+
+.payment-verify-button {
+  background: #1565c0;
+  border: 0;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 7px 11px;
+}
+
+.payment-verify-button:hover {
+  background: #0d47a1;
+}
+
+.tracking-fields { display: grid; gap: 6px; margin-top: 6px; }
+.tracking-fields input { min-width: 150px; padding: 6px 8px; border: 1px solid #d8e0e8; border-radius: 5px; font-size: 11px; }
+.tracking-save-button { width: fit-content; padding: 7px 11px; border: 0; border-radius: 6px; background: #1565c0; color: #fff; font-size: 12px; font-weight: 700; cursor: pointer; }
+.tracking-save-button:hover { background: #0d47a1; }
+.tracking-edit-button { width: fit-content; padding: 7px 11px; border: 1px solid #1565c0; border-radius: 6px; background: #fff; color: #1565c0; font-size: 12px; font-weight: 700; cursor: pointer; }
+.cancellation-reason { box-sizing: border-box; width: 100%; min-height: 96px; margin-top: 10px; padding: 10px; border: 1px solid #d8e0e8; border-radius: 7px; font: inherit; resize: vertical; }
+
 .status-select {
   min-width: 138px;
   border: 1px solid transparent;

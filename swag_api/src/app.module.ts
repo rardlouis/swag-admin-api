@@ -11,9 +11,10 @@ import { ProfileModule } from './profile/profile.module';
 import { ChatModule } from './chat/chat.module';
 import { TryonModule } from './tryon/tryon.module';
 import { ReviewsModule } from './reviews/reviews.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
-  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule, CartModule, SavedModule, ProfileModule, ChatModule, TryonModule, ReviewsModule],
+  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule, CartModule, SavedModule, ProfileModule, ChatModule, TryonModule, ReviewsModule, NotificationsModule],
   controllers: [AppController],
   providers: [AppService],
 })

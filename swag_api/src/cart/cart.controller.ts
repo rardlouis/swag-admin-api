@@ -1,8 +1,10 @@
-import { Body, Controller, Delete, Get, Param, Post, UploadedFile, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { CartService } from './cart.service';
+import { EvaluateCheckoutShippingDto } from './dto/evaluate-checkout-shipping.dto';
+import { SessionAuthGuard, requireOwnership, type SessionIdentity } from '../common/session-auth';
 
 type UploadedReceiptFile = {
   filename: string;
@@ -10,11 +12,23 @@ type UploadedReceiptFile = {
 };
 
 @Controller('cart')
+@UseGuards(SessionAuthGuard)
 export class CartController {
   constructor(private readonly cartService: CartService) {}
 
+  @Post('shipping/evaluate')
+  evaluateShipping(@Body() body: EvaluateCheckoutShippingDto, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, body.userId);
+    return this.cartService.evaluateCheckoutShipping(
+      body.userId,
+      body.addressId,
+      body.selectedCartItemIds,
+    );
+  }
+
   @Get(':userId/items')
-  items(@Param('userId') userId: string) {
+  items(@Param('userId') userId: string, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, userId);
     return this.cartService.items(userId);
   }
 
@@ -27,12 +41,15 @@ export class CartController {
       sizeId?: number | string;
       quantity?: number | string;
     },
+    @Req() request: { user?: SessionIdentity },
   ) {
+    requireOwnership(request.user, body.userId);
     return this.cartService.addItem(body);
   }
 
   @Delete('items/:cartItemId')
-  removeItem(@Param('cartItemId') cartItemId: string, @Body('userId') userId?: string) {
+  removeItem(@Param('cartItemId') cartItemId: string, @Body('userId') userId: string | undefined, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, userId);
     return this.cartService.removeItem(cartItemId, userId);
   }
 
@@ -58,7 +75,8 @@ export class CartController {
       },
     }),
   )
-  checkout(@Body() body: Record<string, string | undefined>, @UploadedFile() file: UploadedReceiptFile) {
+  checkout(@Body() body: Record<string, string | undefined>, @UploadedFile() file: UploadedReceiptFile, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, body.userId);
     return this.cartService.checkout(body, file);
   }
 }

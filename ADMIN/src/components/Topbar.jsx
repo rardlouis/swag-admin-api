@@ -6,7 +6,7 @@ import {
   MdNotifications,
   MdSettings,
 } from "react-icons/md";
-import { apiGet } from "../api.js";
+import { apiGet, apiPatch } from "../api.js";
 import { useChatContext } from "../context/ChatContext.jsx";
 import { clearStoredAdminSession, getAdminDisplayName, getAdminInitial, getAdminPhotoUrl, getAdminRole, getStoredAdminUser } from "../session.js";
 import "./Topbar.css";
@@ -22,6 +22,16 @@ export default function Topbar() {
   const [notifiedUnread, setNotifiedUnread] = useState(0);
 
   const unreadTotal = conversations.reduce((total, conv) => total + conv.unread, 0);
+  const unreadNotifications = notifications.filter((item) => !item.isRead).length;
+  const openNotification = async (item) => {
+    try { await apiPatch(`/admin/notifications/${item.id}/read`, {}); } catch { /* navigation remains available */ }
+    setNotifications((current) => current.map((entry) => entry.id === item.id ? { ...entry, isRead: true } : entry));
+    setNotificationsOpen(false);
+    if (item.entityType === 'order') navigate(`/orders/all-orders?orderId=${item.entityId}`);
+    else if (item.entityType === 'review') navigate(`/reviews/reply/${item.entityId}`);
+    else if (item.entityType === 'chat') navigate(`/chats/all-chats?conversationId=${item.entityId}`);
+    else if (item.entityType === 'product') navigate(`/products/edit/${item.entityId}`);
+  };
 
   useEffect(() => {
     const syncAdminUser = () => setAdminUser(getStoredAdminUser());
@@ -110,14 +120,14 @@ export default function Topbar() {
             type="button"
           >
             <MdNotifications size={20} color="currentColor" />
-            {notifications.length > 0 && <span className="topbar-badge">{notifications.length}</span>}
+            {unreadNotifications > 0 && <span className="topbar-badge">{unreadNotifications}</span>}
           </button>
 
           {notificationsOpen && (
             <div className="topbar-dropdown topbar-notifications">
               <div className="topbar-dropdown-head">
                 <strong>Notifications</strong>
-                <span>{notifications.length} new</span>
+                <span>{unreadNotifications} new</span>
               </div>
 
               <div className="topbar-notification-list">
@@ -126,8 +136,8 @@ export default function Topbar() {
                 )}
 
                 {notifications.map((item) => (
-                  <button className="topbar-notification-item" key={item.id} type="button">
-                    <span className="topbar-notification-dot" />
+                  <button className="topbar-notification-item" key={item.id} type="button" onClick={() => void openNotification(item)}>
+                    {!item.isRead ? <span className="topbar-notification-dot" /> : <span />}
                     <div>
                       <strong>{item.title}</strong>
                       <p>{item.text}</p>
