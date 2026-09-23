@@ -34,7 +34,8 @@ describe('AuthService addressAutocomplete', () => {
         street: 'Barnabas Street',
         barangay: 'Don Bosco',
         city: 'Parañaque',
-        province: 'Metro Manila',
+        province: '',
+        region: 'National Capital Region (NCR)',
         zip: '1700',
       })],
     });
@@ -52,7 +53,7 @@ describe('AuthService addressAutocomplete', () => {
 
     const service = new AuthService({} as never);
     await expect(service.reverseGeocodeAddress('14.5995', '120.9842')).resolves.toEqual({
-      address: expect.objectContaining({ houseNo: '1152', street: 'Tabora Street', city: 'Manila', region: 'NCR', zip: '1012' }),
+      address: expect.objectContaining({ houseNo: '1152', street: 'Tabora Street', city: 'Manila', province: '', region: 'National Capital Region (NCR)', zip: '1012' }),
     });
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/v1/geocode/reverse?lat=14.5995&lon=120.9842'));
   });

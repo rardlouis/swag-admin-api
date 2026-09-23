@@ -30,6 +30,11 @@ export class AdminController {
     return this.adminService.customers();
   }
 
+  @Delete('customers/:id')
+  deleteCustomer(@Param('id') id: string) {
+    return this.adminService.deleteCustomer(id);
+  }
+
   @Get('orders')
   orders() {
     return this.adminService.orders();
@@ -98,6 +103,26 @@ export class AdminController {
   @Get('notifications')
   notifications() {
     return this.adminService.notifications();
+  }
+
+  @Get('vouchers')
+  vouchers() {
+    return this.adminService.vouchers();
+  }
+
+  @Post('vouchers')
+  createVoucher(@Body() body: unknown) {
+    return this.adminService.createVoucher(body);
+  }
+
+  @Patch('vouchers/:id')
+  updateVoucher(@Param('id') id: string, @Body() body: unknown) {
+    return this.adminService.updateVoucher(id, body);
+  }
+
+  @Delete('vouchers/:id')
+  deleteVoucher(@Param('id') id: string) {
+    return this.adminService.deleteVoucher(id);
   }
 
   @Get('id-types')

@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
@@ -30,6 +30,18 @@ export class CartController {
   items(@Param('userId') userId: string, @Req() request: { user?: SessionIdentity }) {
     requireOwnership(request.user, userId);
     return this.cartService.items(userId);
+  }
+
+  @Get(':userId/vouchers')
+  vouchers(@Param('userId') userId: string, @Query('selectedCartItemIds') selectedCartItemIds: string | undefined, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, userId);
+    return this.cartService.availableVouchers(userId, selectedCartItemIds);
+  }
+
+  @Post('voucher/evaluate')
+  evaluateVoucher(@Body() body: { userId?: string; voucherCode?: string; selectedCartItemIds?: string | string[] }, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, body.userId);
+    return this.cartService.evaluateVoucher(body.userId, body.voucherCode, body.selectedCartItemIds);
   }
 
   @Post('items')

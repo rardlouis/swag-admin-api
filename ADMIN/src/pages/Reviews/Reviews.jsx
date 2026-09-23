@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiGet, formatDate } from "../../api.js";
+import { apiDelete, apiGet, formatDate } from "../../api.js";
 import {
   MdChevronLeft,
   MdChevronRight,
@@ -40,6 +40,17 @@ export default function Reviews() {
 
   const toggleAll = () => {
     setSelected(selected.length === filtered.length ? [] : filtered.map((review) => review.id));
+  };
+
+  const deleteReview = async (review) => {
+    if (!window.confirm(`Delete ${review.customer}'s review? This cannot be undone.`)) return;
+    try {
+      await apiDelete(`/reviews/${review.id}/admin`);
+      setReviews((current) => current.filter((item) => item.id !== review.id));
+      setSelected((current) => current.filter((id) => id !== review.id));
+    } catch (err) {
+      setError(err.message || "Unable to delete review");
+    }
   };
 
   return (
@@ -124,7 +135,7 @@ export default function Reviews() {
                     >
                       <MdModeComment size={17} />
                     </button>
-                    <button className="reviews-action-btn" title="Delete" type="button">
+                    <button className="reviews-action-btn" title="Delete" type="button" onClick={() => deleteReview(review)}>
                       <MdDelete size={17} />
                     </button>
                   </div>

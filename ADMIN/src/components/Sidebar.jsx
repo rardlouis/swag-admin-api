@@ -4,7 +4,7 @@ import { apiGet } from "../api.js";
 import { getAdminDisplayName, getAdminInitial, getAdminPhotoUrl, getAdminRole, getStoredAdminUser } from "../session.js";
 import {
   MdDashboard, MdInventory, MdShoppingCart, MdChat, MdPeople,
-  MdStar, MdLocalShipping, MdSettings, MdBarChart, MdHelp,
+  MdStar, MdLocalShipping, MdSettings, MdBarChart, MdHelp, MdConfirmationNumber,
   MdExpandMore, MdExpandLess,
 } from "react-icons/md";
 import "./Sidebar.css";
@@ -17,6 +17,7 @@ const baseNavItems = [
   { label: "Customers",    icon: <MdPeople />,          path: "/customers" },
   { label: "Reviews",      icon: <MdStar />,            path: "/reviews" },
   { label: "Supplier",     icon: <MdLocalShipping />,   path: "/supplier" },
+  { label: "Vouchers",     icon: <MdConfirmationNumber />, path: "/vouchers" },
 ];
 
 const toolItems = [

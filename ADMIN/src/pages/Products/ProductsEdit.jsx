@@ -203,6 +203,8 @@ export default function ProductsEdit() {
     name: form.name,
     description: form.description || null,
     brand: form.brand || null,
+    styleId: form.styleId ? Number(form.styleId) : null,
+    customStyle: form.customStyle || null,
     categoryId: Number(form.categoryId),
     genderId: form.genderId ? Number(form.genderId) : null,
     sizeId: form.sizeId ? Number(form.sizeId) : null,

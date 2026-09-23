@@ -156,7 +156,7 @@ export function ChatProvider({ children }) {
       id: `local-${Date.now()}`,
       from: "admin",
       text,
-      time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      time: new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit" }).format(new Date()),
     };
 
     setConversations((prev) =>

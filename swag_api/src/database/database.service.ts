@@ -7,6 +7,7 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
   private readonly geminiBotUserId = '11111111-1111-4111-8111-111111111111';
 
   private pool: sql.ConnectionPool | null = null;
+  private voucherSchemaPromise: Promise<void> | null = null;
 
   private readonly driver = process.env.DB_DRIVER ?? 'ODBC Driver 17 for SQL Server';
   private readonly server = process.env.DB_SERVER ?? 'localhost\\SQLEXPRESS';
@@ -26,6 +27,7 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
     await this.ensureProductSoftDeleteColumn();
     await this.ensureMessageReadAtColumn();
     await this.ensureConversationViewColumns();
+    await this.ensureVoucherSchema();
     await this.ensureBotUser();
     await this.ensureAdminUser();
   }
@@ -210,6 +212,65 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
         ADD seller_deleted_at DATETIME2(7) NULL
       `);
     }
+  }
+
+  async ensureVoucherSchema() {
+    if (!this.voucherSchemaPromise) {
+      this.voucherSchemaPromise = this.applyVoucherSchema().catch((error) => {
+        this.voucherSchemaPromise = null;
+        throw error;
+      });
+    }
+    return this.voucherSchemaPromise;
+  }
+
+  private async applyVoucherSchema() {
+    if (!(await this.tableExists('ORDERS'))) return;
+
+    await this.query(`
+      IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'VOUCHERS')
+      BEGIN
+        CREATE TABLE VOUCHERS (
+          voucher_id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_VOUCHERS PRIMARY KEY DEFAULT NEWSEQUENTIALID(),
+          code NVARCHAR(50) NOT NULL,
+          discount_type NVARCHAR(10) NOT NULL,
+          discount_value DECIMAL(10, 2) NOT NULL,
+          minimum_order_amount DECIMAL(10, 2) NOT NULL CONSTRAINT DF_VOUCHERS_MINIMUM_ORDER_AMOUNT DEFAULT ((0)),
+          usage_limit INT NULL,
+          usage_count INT NOT NULL CONSTRAINT DF_VOUCHERS_USAGE_COUNT DEFAULT ((0)),
+          start_date DATETIME2(7) NOT NULL,
+          end_date DATETIME2(7) NOT NULL,
+          is_active BIT NOT NULL CONSTRAINT DF_VOUCHERS_IS_ACTIVE DEFAULT ((1)),
+          created_at DATETIME2(7) NOT NULL CONSTRAINT DF_VOUCHERS_CREATED_AT DEFAULT (GETDATE()),
+          updated_at DATETIME2(7) NULL,
+          CONSTRAINT UQ_VOUCHERS_CODE UNIQUE (code),
+          CONSTRAINT CK_VOUCHERS_DISCOUNT_TYPE CHECK (discount_type IN ('PERCENTAGE', 'FIXED')),
+          CONSTRAINT CK_VOUCHERS_DISCOUNT_AMOUNT CHECK (discount_value > 0),
+          CONSTRAINT CK_VOUCHERS_MINIMUM_ORDER_AMOUNT CHECK (minimum_order_amount >= 0),
+          CONSTRAINT CK_VOUCHERS_USAGE_LIMIT CHECK (usage_limit IS NULL OR usage_limit > 0),
+          CONSTRAINT CK_VOUCHERS_DATE_RANGE CHECK (end_date > start_date)
+        );
+      END
+    `);
+
+    const orderColumns = [
+      ['voucher_id', 'UNIQUEIDENTIFIER NULL'],
+      ['voucher_code', 'NVARCHAR(50) NULL'],
+      ['voucher_discount', 'DECIMAL(10, 2) NULL'],
+      ['voucher_discount_amount', 'DECIMAL(10, 2) NOT NULL CONSTRAINT DF_ORDERS_VOUCHER_DISCOUNT_AMOUNT DEFAULT ((0))'],
+    ];
+    for (const [columnName, definition] of orderColumns) {
+      if (!(await this.columnExists('ORDERS', columnName))) {
+        await this.query(`ALTER TABLE ORDERS ADD ${columnName} ${definition}`);
+      }
+    }
+
+    await this.query(`
+      IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'FK_ORDERS_VOUCHERS')
+        ALTER TABLE ORDERS ADD CONSTRAINT FK_ORDERS_VOUCHERS FOREIGN KEY (voucher_id) REFERENCES VOUCHERS(voucher_id);
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_VOUCHERS_ACTIVE_DATES' AND object_id = OBJECT_ID('VOUCHERS'))
+        CREATE INDEX IX_VOUCHERS_ACTIVE_DATES ON VOUCHERS(is_active, start_date, end_date);
+    `);
   }
 
   private async ensureBotUser() {

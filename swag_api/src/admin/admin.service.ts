@@ -57,6 +57,17 @@ type SupplierBody = {
   address?: string;
 };
 
+type VoucherBody = {
+  code?: string;
+  discountType?: string;
+  discountAmount?: number | string;
+  minimumOrderAmount?: number | string;
+  usageLimit?: number | string | null;
+  startAt?: string;
+  endAt?: string | null;
+  isActive?: boolean;
+};
+
 @Injectable()
 export class AdminService {
   private readonly geminiBotUserId = '11111111-1111-4111-8111-111111111111';
@@ -202,13 +213,27 @@ export class AdminService {
   }
 
   async customers() {
+    const [hasEmailOtps, hasSmsOtps] = await Promise.all([
+      this.databaseService.tableExists('EMAIL_OTPS'),
+      this.databaseService.tableExists('SMS_OTP_VERIFICATIONS'),
+    ]);
+    const verificationStatus = hasEmailOtps && hasSmsOtps
+      ? `CASE WHEN EXISTS (
+          SELECT 1 FROM EMAIL_OTPS e
+          WHERE e.email = u.email AND e.verified_at IS NOT NULL AND e.invalidated_at IS NULL
+        ) AND EXISTS (
+          SELECT 1 FROM SMS_OTP_VERIFICATIONS s
+          WHERE (s.phone_number = u.phone OR s.phone_number = CONCAT('0', u.phone))
+            AND s.verified_at IS NOT NULL AND s.invalidated_at IS NULL
+        ) THEN 'Verified' ELSE 'Unverified' END`
+      : "'Unverified'";
     return this.databaseService.query(`
       SELECT
         CONVERT(varchar(36), u.user_id) AS id,
         u.full_name AS name,
         u.email,
         u.phone,
-        CASE WHEN u.id_number IS NULL OR LTRIM(RTRIM(u.id_number)) = '' THEN 'Unverified' ELSE 'Verified' END AS status,
+        ${verificationStatus} AS status,
         COUNT(DISTINCT o.order_id) AS orders,
         COALESCE(
           CONCAT(a.street, ', ', a.city, COALESCE(', ' + a.province, ''), COALESCE(' ' + a.postal_code, '')),
@@ -223,8 +248,8 @@ export class AdminService {
         WHERE ua.user_id = u.user_id
         ORDER BY ua.is_default DESC, ua.created_at DESC
       ) a
-      WHERE u.is_admin = 0
-      GROUP BY u.user_id, u.full_name, u.email, u.phone, u.id_number, a.street, a.city, a.province, a.postal_code, u.created_at
+      WHERE u.is_admin = 0 AND u.is_active = 1
+      GROUP BY u.user_id, u.full_name, u.email, u.phone, a.street, a.city, a.province, a.postal_code, u.created_at
       ORDER BY u.created_at DESC
     `);
   }
@@ -942,6 +967,52 @@ export class AdminService {
     `);
   }
 
+  /**
+   * Immediately finalizes a customer account deleted by an administrator.
+   * Orders retain their user_id for reporting, while login data is anonymized
+   * so the same email and mobile number can be used for a new test account.
+   */
+  async deleteCustomer(id: string) {
+    const users = await this.databaseService.request<{ email: string; phone: string | null }>((request) => request
+      .input('userId', sql.UniqueIdentifier, id)
+      .query(`
+        SELECT email, phone
+        FROM USERS
+        WHERE user_id = @userId AND is_admin = 0 AND is_active = 1
+      `));
+    const user = users[0];
+    if (!user) throw new NotFoundException('Active customer was not found.');
+
+    await this.databaseService.request((request) => request
+      .input('userId', sql.UniqueIdentifier, id)
+      .input('email', sql.NVarChar(255), user.email)
+      .input('phone', sql.NVarChar(20), user.phone).query(`
+        IF COL_LENGTH('USERS', 'deactivated_at') IS NULL ALTER TABLE USERS ADD deactivated_at DATETIME2 NULL;
+        IF COL_LENGTH('USERS', 'deletion_due_at') IS NULL ALTER TABLE USERS ADD deletion_due_at DATETIME2 NULL;
+        IF COL_LENGTH('USERS', 'deletion_finalized_at') IS NULL ALTER TABLE USERS ADD deletion_finalized_at DATETIME2 NULL;
+
+        IF OBJECT_ID('dbo.EMAIL_OTPS', 'U') IS NOT NULL DELETE FROM EMAIL_OTPS WHERE email = @email;
+        IF OBJECT_ID('dbo.SMS_OTP_VERIFICATIONS', 'U') IS NOT NULL
+          DELETE FROM SMS_OTP_VERIFICATIONS WHERE phone_number = @phone OR phone_number = CONCAT('0', @phone);
+        DELETE FROM CART_ITEMS WHERE user_id = @userId;
+        IF OBJECT_ID('dbo.SAVED_PRODUCTS', 'U') IS NOT NULL DELETE FROM SAVED_PRODUCTS WHERE user_id = @userId;
+        UPDATE CONVERSATIONS SET is_active = 0 WHERE buyer_id = @userId;
+        UPDATE USERS
+        SET email = CONCAT('deleted-', CONVERT(varchar(36), user_id), '@deleted.local'),
+            phone = NULL,
+            full_name = 'Deleted customer',
+            id_number = NULL,
+            password_hash = CONVERT(varchar(36), NEWID()),
+            is_active = 0,
+            deactivated_at = GETDATE(),
+            deletion_due_at = GETDATE(),
+            deletion_finalized_at = GETDATE()
+        WHERE user_id = @userId AND is_admin = 0;
+      `));
+
+    return { id, deleted: true };
+  }
+
   async createAdmin(body: unknown) {
     const payload = body as CreateAdminBody;
     const fullName = payload.fullName?.trim() ?? '';
@@ -1120,6 +1191,117 @@ export class AdminService {
     return updated[0];
   }
 
+  async vouchers() {
+    await this.databaseService.ensureVoucherSchema();
+    return this.databaseService.query(`
+      SELECT
+        CONVERT(varchar(36), v.voucher_id) AS id, v.code,
+        LOWER(v.discount_type) AS discountType, CAST(v.discount_value AS float) AS discountAmount,
+        CAST(v.minimum_order_amount AS float) AS minimumOrderAmount,
+        v.usage_limit AS usageLimit, v.usage_count AS usageCount,
+        v.start_date AS startAt, NULLIF(v.end_date, CONVERT(datetime2, '9999-12-31')) AS endAt, v.is_active AS isActive,
+        CASE
+          WHEN v.is_active = 0 THEN 'Inactive'
+          WHEN v.start_date > GETDATE() THEN 'Scheduled'
+          WHEN v.end_date < GETDATE() THEN 'Expired'
+          WHEN v.usage_limit IS NOT NULL AND v.usage_count >= v.usage_limit THEN 'Exhausted'
+          ELSE 'Active'
+        END AS status
+      FROM VOUCHERS v
+      ORDER BY v.created_at DESC
+    `);
+  }
+
+  async createVoucher(body: unknown) {
+    await this.databaseService.ensureVoucherSchema();
+    const voucher = this.validateVoucher(body);
+    let rows: { id: string }[];
+    try {
+      rows = await this.databaseService.request((request) => request
+        .input('code', sql.NVarChar(50), voucher.code)
+        .input('discountType', sql.NVarChar(10), voucher.discountType)
+        .input('discountAmount', sql.Decimal(10, 2), voucher.discountAmount)
+        .input('minimumOrderAmount', sql.Decimal(10, 2), voucher.minimumOrderAmount)
+        .input('usageLimit', sql.Int, voucher.usageLimit)
+        .input('startAt', sql.DateTime2, voucher.startAt)
+        .input('endAt', sql.DateTime2, voucher.endAt)
+        .input('isActive', sql.Bit, voucher.isActive).query(`
+        INSERT INTO VOUCHERS (code, discount_type, discount_value, minimum_order_amount, usage_limit, start_date, end_date, is_active)
+          OUTPUT CONVERT(varchar(36), inserted.voucher_id) AS id
+          VALUES (@code, UPPER(@discountType), @discountAmount, @minimumOrderAmount, @usageLimit, @startAt, COALESCE(@endAt, CONVERT(datetime2, '9999-12-31')), @isActive)
+        `));
+    } catch (error) {
+      this.rethrowVoucherWriteError(error);
+    }
+    return { id: rows[0]?.id };
+  }
+
+  async updateVoucher(id: string, body: unknown) {
+    await this.databaseService.ensureVoucherSchema();
+    const voucher = this.validateVoucher(body);
+    let rows: { id: string }[];
+    try {
+      rows = await this.databaseService.request((request) => request
+      .input('id', sql.UniqueIdentifier, id)
+      .input('code', sql.NVarChar(50), voucher.code)
+      .input('discountType', sql.NVarChar(10), voucher.discountType)
+      .input('discountAmount', sql.Decimal(10, 2), voucher.discountAmount)
+      .input('minimumOrderAmount', sql.Decimal(10, 2), voucher.minimumOrderAmount)
+      .input('usageLimit', sql.Int, voucher.usageLimit)
+      .input('startAt', sql.DateTime2, voucher.startAt)
+      .input('endAt', sql.DateTime2, voucher.endAt)
+      .input('isActive', sql.Bit, voucher.isActive).query(`
+        UPDATE VOUCHERS SET code = @code, discount_type = UPPER(@discountType), discount_value = @discountAmount,
+          minimum_order_amount = @minimumOrderAmount, usage_limit = @usageLimit, start_date = @startAt,
+          end_date = COALESCE(@endAt, CONVERT(datetime2, '9999-12-31')), is_active = @isActive, updated_at = GETDATE()
+        OUTPUT CONVERT(varchar(36), inserted.voucher_id) AS id
+        WHERE voucher_id = @id
+      `));
+    } catch (error) {
+      this.rethrowVoucherWriteError(error);
+    }
+    if (!rows[0]) throw new NotFoundException('Voucher not found');
+    return { id };
+  }
+
+  async deleteVoucher(id: string) {
+    await this.databaseService.ensureVoucherSchema();
+    const rows = await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, id).query(`
+      DELETE FROM VOUCHERS OUTPUT CONVERT(varchar(36), deleted.voucher_id) AS id
+      WHERE voucher_id = @id AND NOT EXISTS (SELECT 1 FROM ORDERS WHERE voucher_id = @id)
+    `));
+    if (!rows[0]) throw new BadRequestException('Voucher cannot be deleted because it was used or was not found. Deactivate it instead.');
+    return { deleted: true, id };
+  }
+
+  private validateVoucher(body: unknown) {
+    const payload = body as VoucherBody;
+    const code = payload.code?.trim().toUpperCase() ?? '';
+    const discountType = payload.discountType === 'fixed' ? 'fixed' : payload.discountType === 'percentage' ? 'percentage' : '';
+    const discountAmount = Number(payload.discountAmount);
+    const minimumOrderAmount = Number(payload.minimumOrderAmount ?? 0);
+    const usageLimit = payload.usageLimit === null || payload.usageLimit === '' || payload.usageLimit === undefined ? null : Number(payload.usageLimit);
+    const startAt = payload.startAt ? new Date(payload.startAt) : new Date();
+    const endAt = payload.endAt ? new Date(payload.endAt) : null;
+
+    if (!/^[A-Z0-9_-]{3,50}$/.test(code)) throw new BadRequestException('Voucher code must be 3–50 letters, numbers, hyphens, or underscores.');
+    if (!discountType || !Number.isFinite(discountAmount) || discountAmount <= 0) throw new BadRequestException('A positive percentage or fixed discount is required.');
+    if (discountType === 'percentage' && discountAmount > 100) throw new BadRequestException('Percentage discounts cannot exceed 100%.');
+    if (!Number.isFinite(minimumOrderAmount) || minimumOrderAmount < 0) throw new BadRequestException('Minimum order amount cannot be negative.');
+    if (usageLimit !== null && (!Number.isInteger(usageLimit) || usageLimit < 1)) throw new BadRequestException('Usage limit must be at least 1 or blank.');
+    if (Number.isNaN(startAt.getTime()) || (endAt && Number.isNaN(endAt.getTime())) || (endAt && endAt <= startAt)) throw new BadRequestException('End date must be after the start date.');
+
+    return { code, discountType, discountAmount, minimumOrderAmount, usageLimit, startAt, endAt, isActive: payload.isActive !== false };
+  }
+
+  private rethrowVoucherWriteError(error: unknown): never {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/UQ_VOUCHERS_CODE|duplicate key|unique constraint/i.test(message)) {
+      throw new BadRequestException('That voucher code already exists. Choose a different code.');
+    }
+    throw error;
+  }
+
   private senderLabel(sender: string) {
     if (sender === 'customer') return 'Customer';
     if (sender === 'ai') return 'AI';
@@ -1129,6 +1311,7 @@ export class AdminService {
   private clockTime(value: Date | string | null) {
     if (!value) return '';
     return new Intl.DateTimeFormat('en-PH', {
+      timeZone: 'Asia/Manila',
       hour: '2-digit',
       minute: '2-digit',
     }).format(new Date(value));

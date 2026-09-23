@@ -297,6 +297,26 @@ export class ReviewsService {
     return { deleted: true, id: reviewId };
   }
 
+  async removeAsAdmin(reviewId: string) {
+    await this.ensureReviewTables();
+    const deleted = await this.databaseService.request<{ deleted: number }>((request) => request
+      .input('reviewId', sql.UniqueIdentifier, reviewId).query(`
+        SET XACT_ABORT ON; BEGIN TRANSACTION;
+        DECLARE @productId uniqueidentifier = (SELECT product_id FROM REVIEWS WITH (UPDLOCK, HOLDLOCK) WHERE review_id = @reviewId);
+        IF @productId IS NOT NULL
+        BEGIN
+          DELETE FROM REVIEW_PHOTOS WHERE review_id = @reviewId;
+          DELETE FROM REVIEW_REACTIONS WHERE review_id = @reviewId;
+          DELETE FROM REVIEW_REPLIES WHERE review_id = @reviewId;
+          DELETE FROM REVIEWS WHERE review_id = @reviewId;
+          UPDATE PRODUCTS SET avg_rating = ISNULL((SELECT CAST(AVG(CAST(rating AS decimal(3, 2))) AS decimal(3, 2)) FROM REVIEWS WHERE product_id = @productId), 0) WHERE product_id = @productId;
+        END
+        COMMIT TRANSACTION; SELECT CASE WHEN @productId IS NULL THEN 0 ELSE 1 END AS deleted;
+      `));
+    if (!Number(deleted[0]?.deleted)) throw new BadRequestException('Review not found.');
+    return { deleted: true, id: reviewId };
+  }
+
   async reply(reviewId: string, body: { userId?: string; comment?: string }) {
     await this.ensureReviewTables();
 

@@ -25,6 +25,7 @@ type CheckoutBody = {
   region?: string;
   postalCode?: string;
   shippingAddress?: string;
+  voucherCode?: string;
 };
 
 type UploadedReceiptFile = {
@@ -42,6 +43,11 @@ type ShippingEvaluation = {
   destinationProvince?: string;
   missingShippingProducts?: Array<{ productId: string; productName: string }>;
 };
+
+export function calculateVoucherDiscount(subtotal: number, type: string, amount: number) {
+  const discount = type === 'percentage' ? subtotal * amount / 100 : amount;
+  return Math.round(Math.min(subtotal, discount) * 100) / 100;
+}
 
 @Injectable()
 export class CartService {
@@ -366,11 +372,48 @@ export class CartService {
     };
   }
 
+  async availableVouchers(userId?: string, selectedCartItemIds?: string | string[]) {
+    await this.databaseService.ensureVoucherSchema();
+    const subtotal = await this.checkoutSubtotal(userId, selectedCartItemIds);
+    const vouchers = await this.databaseService.request<{
+      id: string; code: string; discountType: string; discountAmount: number; minimumOrderAmount: number;
+      usageLimit: number | null; usageCount: number; startAt: Date; endAt: Date | null;
+    }>((request) => request.input('subtotal', sql.Decimal(10, 2), subtotal).query(`
+      SELECT CONVERT(varchar(36), voucher_id) AS id, code,
+        LOWER(discount_type) AS discountType, CAST(discount_value AS float) AS discountAmount, CAST(minimum_order_amount AS float) AS minimumOrderAmount,
+        usage_limit AS usageLimit, usage_count AS usageCount, start_date AS startAt, NULLIF(end_date, CONVERT(datetime2, '9999-12-31')) AS endAt
+      FROM VOUCHERS
+      WHERE is_active = 1 AND start_date <= GETDATE() AND end_date >= GETDATE()
+        AND @subtotal >= minimum_order_amount AND (usage_limit IS NULL OR usage_count < usage_limit)
+      ORDER BY minimum_order_amount ASC, code ASC
+    `));
+    return vouchers.map((voucher) => ({ ...voucher, discountAmount: Number(voucher.discountAmount), estimatedDiscount: calculateVoucherDiscount(subtotal, voucher.discountType, Number(voucher.discountAmount)) }));
+  }
+
+  async evaluateVoucher(userId?: string, voucherCode?: string, selectedCartItemIds?: string | string[]) {
+    await this.databaseService.ensureVoucherSchema();
+    const code = voucherCode?.trim().toUpperCase();
+    if (!code) throw new BadRequestException('Voucher code is required.');
+    const subtotal = await this.checkoutSubtotal(userId, selectedCartItemIds);
+    const rows = await this.databaseService.request<{ id: string; code: string; discountType: string; discountAmount: number }>((request) => request
+      .input('code', sql.NVarChar(50), code)
+      .input('subtotal', sql.Decimal(10, 2), subtotal).query(`
+        SELECT CONVERT(varchar(36), voucher_id) AS id, code, LOWER(discount_type) AS discountType, CAST(discount_value AS float) AS discountAmount
+        FROM VOUCHERS
+        WHERE code = @code AND is_active = 1 AND start_date <= GETDATE() AND end_date >= GETDATE()
+          AND @subtotal >= minimum_order_amount AND (usage_limit IS NULL OR usage_count < usage_limit)
+      `));
+    if (!rows[0]) throw new BadRequestException('Voucher is invalid, unavailable, or does not meet this order’s minimum.');
+    const voucher = rows[0];
+    return { voucherId: voucher.id, code: voucher.code, subtotal, discountAmount: calculateVoucherDiscount(subtotal, voucher.discountType, Number(voucher.discountAmount)) };
+  }
+
   async checkout(body: CheckoutBody, file?: UploadedReceiptFile) {
     const userId = body.userId;
     const selectedCartItemIds = this.parseSelectedCartItemIds(body.selectedCartItemIds);
     const paymentMethod = body.paymentMethod?.trim() || 'GCash';
     const referenceNumber = body.referenceNumber?.trim() ?? '';
+    const voucherCode = body.voucherCode?.trim().toUpperCase() || null;
 
     if (!userId) {
       throw new BadRequestException('User id is required');
@@ -392,6 +435,8 @@ export class CartService {
       throw new BadRequestException('Payment receipt screenshot is required');
     }
 
+    await this.databaseService.ensureVoucherSchema();
+    await this.ensureCheckoutColumns();
     const receiptUrl = `http://localhost:5000/uploads/receipts/${file.filename}`;
     const selectedCartItemIdsJson = JSON.stringify(selectedCartItemIds);
     const address = this.normalizeAddress(body);
@@ -406,6 +451,7 @@ export class CartService {
         .input('userId', sql.UniqueIdentifier, userId)
         .input('addressId', sql.UniqueIdentifier, addressId)
         .input('selectedCartItemIdsJson', sql.NVarChar(sql.MAX), selectedCartItemIdsJson)
+        .input('voucherCode', sql.NVarChar(50), voucherCode)
         .input('shippingFee', sql.Decimal(10, 2), shipping.shippingFee)
         .input('paymentMethod', sql.NVarChar(30), 'GCash')
         .input('referenceNumber', sql.NVarChar(100), referenceNumber)
@@ -466,6 +512,30 @@ export class CartService {
             INNER JOIN @selected s ON s.cart_item_id = ci.cart_item_id
             INNER JOIN PRODUCTS p ON p.product_id = ci.product_id
           );
+          DECLARE @voucherId uniqueidentifier = NULL;
+          DECLARE @voucherDiscount decimal(10, 2) = 0;
+
+          IF @voucherCode IS NOT NULL
+          BEGIN
+            SELECT TOP 1 @voucherId = voucher_id,
+              @voucherDiscount = CASE
+                WHEN discount_type = 'PERCENTAGE' THEN ROUND(@subtotal * discount_value / 100.0, 2)
+                ELSE discount_value
+              END
+            FROM VOUCHERS WITH (UPDLOCK, HOLDLOCK)
+            WHERE code = @voucherCode
+              AND is_active = 1
+              AND start_date <= GETDATE()
+              AND end_date >= GETDATE()
+              AND @subtotal >= minimum_order_amount
+              AND (usage_limit IS NULL OR usage_count < usage_limit);
+
+            IF @voucherId IS NULL
+              THROW 51003, 'Voucher is invalid, unavailable, or does not meet this order''s minimum.', 1;
+
+            SET @voucherDiscount = CASE WHEN @voucherDiscount > @subtotal THEN @subtotal ELSE @voucherDiscount END;
+            UPDATE VOUCHERS SET usage_count = usage_count + 1, updated_at = GETDATE() WHERE voucher_id = @voucherId;
+          END
 
           INSERT INTO ORDERS (
             order_id,
@@ -481,13 +551,17 @@ export class CartService {
             payment_receipt_url,
             tracking_number,
             expected_delivery_at
+            ,voucher_id
+            ,voucher_code
+            ,voucher_discount
+            ,voucher_discount_amount
           )
           VALUES (
             @orderId,
             @userId,
             @addressId,
             @statusId,
-            @subtotal + @shippingFee,
+            @subtotal - @voucherDiscount + @shippingFee,
             GETDATE(),
             GETDATE(),
             @shippingFee,
@@ -495,7 +569,11 @@ export class CartService {
             @referenceNumber,
             @receiptUrl,
             CONCAT('AFD', FORMAT(GETDATE(), 'yyyyMMdd'), RIGHT(REPLACE(CONVERT(varchar(36), @orderId), '-', ''), 8)),
-            DATEADD(day, 7, GETDATE())
+            DATEADD(day, 7, GETDATE()),
+            @voucherId,
+            @voucherCode,
+            @voucherDiscount,
+            @voucherDiscount
           );
 
           INSERT INTO ORDER_ITEMS (order_id, product_id, size_id, quantity, unit_price)
@@ -581,6 +659,24 @@ export class CartService {
       postalCode: body.postalCode?.trim() || null,
     };
   }
+
+  private async checkoutSubtotal(userId?: string, selectedCartItemIds?: string | string[]) {
+    if (!userId) throw new BadRequestException('User id is required.');
+    const selectedIds = this.parseSelectedCartItemIds(selectedCartItemIds);
+    if (!selectedIds.length) throw new BadRequestException('Choose at least one cart item.');
+    const rows = await this.databaseService.request<{ subtotal: number; itemCount: number }>((request) => request
+      .input('userId', sql.UniqueIdentifier, userId)
+      .input('selectedCartItemIdsJson', sql.NVarChar(sql.MAX), JSON.stringify(selectedIds)).query(`
+        SELECT CAST(SUM(CAST(ci.quantity AS decimal(10,2)) * p.price) AS float) AS subtotal, COUNT(*) AS itemCount
+        FROM CART_ITEMS ci INNER JOIN PRODUCTS p ON p.product_id = ci.product_id
+        WHERE ci.user_id = @userId AND ci.cart_item_id IN (
+          SELECT TRY_CONVERT(uniqueidentifier, [value]) FROM OPENJSON(@selectedCartItemIdsJson)
+        )
+      `));
+    if (!rows[0] || Number(rows[0].itemCount) !== selectedIds.length) throw new BadRequestException('One or more cart items were not found.');
+    return Number(rows[0].subtotal);
+  }
+
 
   private async getUserAddress(userId: string, addressId?: string) {
     return this.databaseService.request<{ addressId: string; province: string | null }>((request) => {

@@ -19,6 +19,7 @@ import ReviewsReply from "./pages/Reviews/ReviewsReply";
 import SalesReport from "./pages/SalesReport/SalesReport";
 import Settings from "./pages/Settings/Settings";
 import Help from "./pages/Help/Help";
+import Vouchers from "./pages/Vouchers/Vouchers";
 
 function RequireAdminSession() {
   const token =
@@ -55,6 +56,7 @@ function App() {
           <Route path="/supplier" element={<Suppliers />} />
           <Route path="/supplier/add" element={<SuppliersAdd />} />
           <Route path="/supplier/edit/:id" element={<SuppliersEdit />} />
+          <Route path="/vouchers" element={<Vouchers />} />
           <Route path="/reviews" element={<Reviews />} />
           <Route path="/reviews/reply/:id" element={<ReviewsReply />} />
           <Route path="/settings" element={<Settings />} />

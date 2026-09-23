@@ -25,6 +25,7 @@ type AppRegisterBody = {
   address_barangay?: string | null;
   address_city?: string | null;
   address_province?: string | null;
+  address_region?: string | null;
   address_zip?: string | null;
   fashion_style?: string;
   preferred_size?: string;
@@ -264,7 +265,7 @@ export class AuthService {
       const response = await fetch(`https://api.geoapify.com/v1/geocode/autocomplete?text=${encodeURIComponent(query)}&filter=countrycode:ph&bias=proximity:121.0,14.6&limit=5&format=json&apiKey=${encodeURIComponent(process.env.GEOAPIFY_API_KEY)}`);
       if (!response.ok) throw new Error('Geoapify request failed');
       const payload = await response.json() as { results?: Array<Record<string, unknown>> };
-      return { suggestions: (payload.results ?? []).map((item) => ({ label: item.formatted ?? '', houseNo: item.housenumber ?? '', street: item.street ?? item.address_line1 ?? '', barangay: item.suburb ?? item.district ?? '', city: item.city ?? item.county ?? '', province: item.state ?? '', region: item.state_district ?? item.region ?? '', zip: item.postcode ?? '', country: item.country ?? 'Philippines', latitude: item.lat ?? null, longitude: item.lon ?? null })) };
+      return { suggestions: (payload.results ?? []).map((item) => this.geoapifyAddress(item)) };
     } catch { throw new BadRequestException('Address suggestions are unavailable right now.'); }
   }
 
@@ -422,22 +423,35 @@ export class AuthService {
       const payload = await response.json() as { results?: Array<Record<string, unknown>> };
       const item = payload.results?.[0];
       if (!item) throw new Error('No address result');
-      return {
-        address: {
-          label: item.formatted ?? '',
-          houseNo: item.housenumber ?? '',
-          street: item.street ?? item.address_line1 ?? '',
-          barangay: item.suburb ?? item.district ?? '',
-          city: item.city ?? item.county ?? '',
-          province: item.state ?? '',
-          // Region is UI-only: the live USER_ADDRESSES table has no region column.
-          region: item.state_district ?? item.region ?? '',
-          zip: item.postcode ?? '',
-        },
-      };
+      return { address: this.geoapifyAddress(item) };
     } catch {
       throw new BadRequestException('Your location could not be converted to an address right now.');
     }
+  }
+
+  private geoapifyAddress(item: Record<string, unknown>) {
+    const rawProvince = String(item.state ?? '').trim();
+    const rawRegion = String(item.state_district ?? item.region ?? '').trim();
+    const ncr = /national capital|metro manila|\bncr\b/i.test(`${rawProvince} ${rawRegion}`);
+    return {
+      label: String(item.formatted ?? ''),
+      houseNo: String(item.housenumber ?? ''),
+      street: String(item.street ?? item.address_line1 ?? ''),
+      barangay: String(item.suburb ?? item.district ?? ''),
+      city: String(item.city ?? item.county ?? ''),
+      // GeoApify represents NCR as a state in some results. Keep it in Region;
+      // shipping uses the city/Metro Manila alias when a province is unavailable.
+      province: ncr ? '' : rawProvince,
+      region: ncr ? 'National Capital Region (NCR)' : rawRegion,
+      zip: String(item.postcode ?? ''),
+      country: String(item.country ?? 'Philippines'),
+      latitude: item.lat ?? null,
+      longitude: item.lon ?? null,
+    };
+  }
+
+  private isNcr(value?: string | null) {
+    return /national capital|metro manila|\bncr\b/i.test(value ?? '');
   }
 
   async deleteAppAccount(userId: string, body: { email?: string; password?: string; confirmation?: string }) {
@@ -508,7 +522,8 @@ export class AuthService {
     const addressStreet = payload.address_street?.trim() || null;
     const addressBarangay = payload.address_barangay?.trim() || null;
     const addressCity = payload.address_city?.trim() || null;
-    const addressProvince = payload.address_province?.trim() || null;
+    const addressRegion = payload.address_region?.trim() || null;
+    const addressProvince = payload.address_province?.trim() || (this.isNcr(addressRegion) ? 'Metro Manila' : null);
     const addressZip = payload.address_zip?.trim() || null;
     const shippingAddress = payload.shipping_address?.trim() || [addressHouseNo, addressStreet, addressBarangay, addressCity, addressProvince, addressZip]
       .filter(Boolean)
@@ -718,7 +733,8 @@ export class AuthService {
     const addressStreet = payload.address_street?.trim() || null;
     const addressBarangay = payload.address_barangay?.trim() || null;
     const addressCity = payload.address_city?.trim() || null;
-    const addressProvince = payload.address_province?.trim() || null;
+    const addressRegion = payload.address_region?.trim() || null;
+    const addressProvince = payload.address_province?.trim() || (this.isNcr(addressRegion) ? 'Metro Manila' : null);
     const addressZip = payload.address_zip?.trim() || null;
     const shippingAddress = payload.shipping_address?.trim() || [addressHouseNo, addressStreet, addressBarangay, addressCity, addressProvince, addressZip]
       .filter(Boolean)

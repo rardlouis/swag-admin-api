@@ -3,7 +3,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { ReviewsService } from './reviews.service';
-import { SessionAuthGuard, type SessionIdentity } from '../common/session-auth';
+import { AdminGuard, SessionAuthGuard, type SessionIdentity } from '../common/session-auth';
 
 type UploadedReviewFile = {
   filename: string;
@@ -57,6 +57,12 @@ export class ReviewsController {
   @UseGuards(SessionAuthGuard)
   removeOwn(@Param('id') id: string, @Req() request: { user?: SessionIdentity }) {
     return this.reviewsService.removeOwn(id, request.user!.sub);
+  }
+
+  @Delete(':id/admin')
+  @UseGuards(AdminGuard)
+  removeAsAdmin(@Param('id') id: string) {
+    return this.reviewsService.removeAsAdmin(id);
   }
 
   @Post(':id/react')

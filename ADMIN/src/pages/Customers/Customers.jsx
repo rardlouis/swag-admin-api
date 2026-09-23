@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiGet } from "../../api.js";
+import { apiDelete, apiGet } from "../../api.js";
 import {
   MdSearch,
   MdFilterList,
@@ -52,12 +52,19 @@ export default function Customer() {
   const toggleAll = () =>
     setSelected(selected.length === paginated.length ? [] : paginated.map((_, i) => i));
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (deleteTarget === null) return;
-    const globalIdx = (page - 1) * pageSize + deleteTarget;
-    setCustomers((prev) => prev.filter((_, i) => i !== globalIdx));
-    setDeleteTarget(null);
-    setSelected([]);
+    const customer = paginated[deleteTarget];
+    if (!customer) return;
+    try {
+      setError("");
+      await apiDelete(`/admin/customers/${customer.id}`);
+      setCustomers((prev) => prev.filter((item) => item.id !== customer.id));
+      setDeleteTarget(null);
+      setSelected([]);
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
   return (
