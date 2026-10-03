@@ -26,6 +26,7 @@ type CheckoutBody = {
   postalCode?: string;
   shippingAddress?: string;
   voucherCode?: string;
+  acknowledgedParcelCount?: string | number;
 };
 
 type UploadedReceiptFile = {
@@ -34,15 +35,42 @@ type UploadedReceiptFile = {
 
 type ShippingEvaluation = {
   allowed: boolean;
-  code?: 'WEIGHT_EXCEEDED' | 'BULK_EXCEEDED' | 'SHIPPING_DATA_MISSING' | 'SHIPPING_RATE_NOT_FOUND';
+  code?: 'WEIGHT_EXCEEDED' | 'BULK_EXCEEDED' | 'SHIPPING_DATA_MISSING' | 'SHIPPING_RATE_NOT_FOUND' | 'MULTIPLE_PARCELS_CONFIRMATION_REQUIRED';
   message?: string;
   totalWeightKg?: number;
   totalBulkUnits?: number;
   packageLabel?: string;
+  parcelCount?: number;
+  shippingFeePerParcel?: number;
   shippingFee?: number;
   destinationProvince?: string;
   missingShippingProducts?: Array<{ productId: string; productName: string }>;
 };
+
+export type ParcelUnit = { bulk: number; weight: number };
+
+const round2 = (value: number) => Math.round(value * 100) / 100;
+const round3 = (value: number) => Math.round(value * 1000) / 1000;
+
+/** Packs indivisible item units using first-fit decreasing. */
+export function packIntoParcels(units: ParcelUnit[], maxBulk: number, maxWeight: number) {
+  const sorted = [...units].sort((a, b) => b.bulk - a.bulk || b.weight - a.weight);
+  const parcels: ParcelUnit[] = [];
+
+  for (const unit of sorted) {
+    const parcel = parcels.find(
+      (candidate) => round2(candidate.bulk + unit.bulk) <= maxBulk && round3(candidate.weight + unit.weight) <= maxWeight,
+    );
+    if (parcel) {
+      parcel.bulk = round2(parcel.bulk + unit.bulk);
+      parcel.weight = round3(parcel.weight + unit.weight);
+    } else {
+      parcels.push({ bulk: unit.bulk, weight: unit.weight });
+    }
+  }
+
+  return parcels;
+}
 
 export function calculateVoucherDiscount(subtotal: number, type: string, amount: number) {
   const discount = type === 'percentage' ? subtotal * amount / 100 : amount;
@@ -320,20 +348,26 @@ export class CartService {
       return this.shippingFailure('SHIPPING_DATA_MISSING', 'The active Big shipping configuration is unavailable.');
     }
 
-    if (totalWeightKg > Number(config.maxWeightKg)) {
-      return this.shippingFailure('WEIGHT_EXCEEDED', 'The selected items exceed the maximum shipping weight.', {
+    if (items.some((item) => Number(item.resolvedBulkUnits) > config.maxBulkUnits)) {
+      return this.shippingFailure('BULK_EXCEEDED', 'One of the selected items is too big to ship in a single parcel.', {
         totalWeightKg,
         totalBulkUnits,
         packageLabel: config.packageLabel,
       });
     }
-    if (totalBulkUnits > Number(config.maxBulkUnits)) {
-      return this.shippingFailure('BULK_EXCEEDED', 'The selected items exceed the maximum shipping bulk.', {
+    if (items.some((item) => Number(item.resolvedWeightKg) > config.maxWeightKg)) {
+      return this.shippingFailure('WEIGHT_EXCEEDED', 'One of the selected items is too heavy to ship in a single parcel.', {
         totalWeightKg,
         totalBulkUnits,
         packageLabel: config.packageLabel,
       });
     }
+
+    const units = items.flatMap((item) => Array.from({ length: Number(item.quantity) }, () => ({
+      bulk: Number(item.resolvedBulkUnits),
+      weight: Number(item.resolvedWeightKg),
+    })));
+    const parcelCount = packIntoParcels(units, config.maxBulkUnits, config.maxWeightKg).length;
 
     const destinationProvince = address.province?.trim() ?? '';
     const rateLocations = this.shippingRateLocations(destinationProvince);
@@ -362,12 +396,15 @@ export class CartService {
       });
     }
 
+    const shippingFeePerParcel = this.roundShippingValue(Number(rate.shippingFee), 2);
     return {
       allowed: true,
       totalWeightKg,
       totalBulkUnits,
       packageLabel: config.packageLabel,
-      shippingFee: this.roundShippingValue(Number(rate.shippingFee), 2),
+      parcelCount,
+      shippingFeePerParcel,
+      shippingFee: this.roundShippingValue(Number(rate.shippingFee) * parcelCount, 2),
       destinationProvince,
     };
   }
@@ -437,13 +474,24 @@ export class CartService {
 
     await this.databaseService.ensureVoucherSchema();
     await this.ensureCheckoutColumns();
-    const receiptUrl = `http://localhost:5000/uploads/receipts/${file.filename}`;
+    const receiptUrl = `/uploads/receipts/${file.filename}`;
     const selectedCartItemIdsJson = JSON.stringify(selectedCartItemIds);
     const address = this.normalizeAddress(body);
     const addressId = await this.resolveCheckoutAddressId(userId, body.addressId, address);
     const shipping = await this.evaluateCheckoutShipping(userId, addressId, selectedCartItemIds);
     if (!shipping.allowed) {
       throw this.shippingException(shipping.code!, shipping.message!);
+    }
+    if (shipping.parcelCount! > 1 && Number(body.acknowledgedParcelCount) !== shipping.parcelCount) {
+      throw this.shippingException(
+        'MULTIPLE_PARCELS_CONFIRMATION_REQUIRED',
+        `Your order needs ${shipping.parcelCount} parcels. Shipping is ${shipping.shippingFeePerParcel} per parcel (${shipping.shippingFee} total). Please confirm to continue.`,
+        {
+          parcelCount: shipping.parcelCount,
+          shippingFeePerParcel: shipping.shippingFeePerParcel,
+          shippingFee: shipping.shippingFee,
+        },
+      );
     }
 
     const rows = await this.databaseService.request<{ orderId: string }>((request) =>
@@ -452,6 +500,7 @@ export class CartService {
         .input('addressId', sql.UniqueIdentifier, addressId)
         .input('selectedCartItemIdsJson', sql.NVarChar(sql.MAX), selectedCartItemIdsJson)
         .input('voucherCode', sql.NVarChar(50), voucherCode)
+        .input('parcelCount', sql.Int, shipping.parcelCount)
         .input('shippingFee', sql.Decimal(10, 2), shipping.shippingFee)
         .input('paymentMethod', sql.NVarChar(30), 'GCash')
         .input('referenceNumber', sql.NVarChar(100), referenceNumber)
@@ -545,10 +594,12 @@ export class CartService {
             total_amount,
             placed_at,
             updated_at,
+            parcel_count,
             shipping_fee,
             payment_method,
             payment_reference_number,
             payment_receipt_url,
+            payment_status,
             tracking_number,
             expected_delivery_at
             ,voucher_id
@@ -564,10 +615,12 @@ export class CartService {
             @subtotal - @voucherDiscount + @shippingFee,
             GETDATE(),
             GETDATE(),
+            @parcelCount,
             @shippingFee,
             @paymentMethod,
             @referenceNumber,
             @receiptUrl,
+            'Pending Verification',
             CONCAT('AFD', FORMAT(GETDATE(), 'yyyyMMdd'), RIGHT(REPLACE(CONVERT(varchar(36), @orderId), '-', ''), 8)),
             DATEADD(day, 7, GETDATE()),
             @voucherId,
@@ -737,8 +790,12 @@ export class CartService {
     return { allowed: false, code, message, ...details };
   }
 
-  private shippingException(code: NonNullable<ShippingEvaluation['code']>, message: string) {
-    return new HttpException({ statusCode: 400, code, message }, 400);
+  private shippingException(
+    code: NonNullable<ShippingEvaluation['code']>,
+    message: string,
+    details: Pick<ShippingEvaluation, 'parcelCount' | 'shippingFeePerParcel' | 'shippingFee'> = {},
+  ) {
+    return new HttpException({ statusCode: 400, code, message, ...details }, 400);
   }
 
   private roundShippingValue(value: number, decimalPlaces: number) {
@@ -768,6 +825,7 @@ export class CartService {
       ['payment_method', 'NVARCHAR(30) NULL'],
       ['payment_reference_number', 'NVARCHAR(100) NULL'],
       ['payment_receipt_url', 'NVARCHAR(500) NULL'],
+      ['payment_status', 'NVARCHAR(50) NULL'],
       ['tracking_number', 'NVARCHAR(50) NULL'],
       ['expected_delivery_at', 'DATETIME2(7) NULL'],
     ];

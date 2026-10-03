@@ -1,4 +1,6 @@
 import { AuthService } from './auth.service';
+import { createHash } from 'crypto';
+import { hashPassword } from '../common/passwords';
 
 describe('AuthService addressAutocomplete', () => {
   const originalApiKey = process.env.GEOAPIFY_API_KEY;
@@ -56,5 +58,72 @@ describe('AuthService addressAutocomplete', () => {
       address: expect.objectContaining({ houseNo: '1152', street: 'Tabora Street', city: 'Manila', province: '', region: 'National Capital Region (NCR)', zip: '1012' }),
     });
     expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/v1/geocode/reverse?lat=14.5995&lon=120.9842'));
+  });
+});
+
+describe('AuthService password reset sessions', () => {
+  it('mints a reset session after OTP verification and consumes that session during reset', async () => {
+    const email = 'customer@example.com';
+    const code = '123456';
+    const otpRowId = '11111111-1111-4111-8111-111111111111';
+    const userId = '22222222-2222-4222-8222-222222222222';
+    const oldPasswordHash = await hashPassword('OldPassword1');
+    const queries: Array<{ text: string; values: Map<string, unknown> }> = [];
+
+    const database = {
+      query: jest.fn().mockResolvedValue([]),
+      columnExists: jest.fn().mockResolvedValue(true),
+      request: jest.fn(async (handler: (request: unknown) => Promise<{ recordset: unknown[] }>) => {
+        const values = new Map<string, unknown>();
+        const request = {
+          input: jest.fn((name: string, _type: unknown, value: unknown) => {
+            values.set(name, value);
+            return request;
+          }),
+          query: jest.fn(async (text: string) => {
+            queries.push({ text, values: new Map(values) });
+            if (text.includes('DATEDIFF(SECOND, GETDATE(), expires_at)')) {
+              return {
+                recordset: [{
+                  id: otpRowId,
+                  codeHash: createHash('sha256').update(`${email}:password_reset:${code}`).digest('hex'),
+                  secondsRemaining: 300,
+                  attempts: 0,
+                }],
+              };
+            }
+            if (text.includes('SELECT COUNT(*) AS count FROM EMAIL_OTPS')) {
+              return { recordset: [{ count: 1 }] };
+            }
+            if (text.includes('FROM USERS WHERE LOWER(email) = LOWER(@email)')) {
+              return { recordset: [{ userId, passwordHash: oldPasswordHash }] };
+            }
+            return { recordset: [] };
+          }),
+        };
+        const result = await handler(request);
+        return result.recordset;
+      }),
+    };
+    const service = new AuthService(database as never, {} as never);
+
+    const verification = await service.verifyPasswordResetOtp(email, code);
+
+    expect(verification.verificationId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(verification.verificationId).not.toBe(otpRowId);
+    expect(verification.resetSessionId).toBe(verification.verificationId);
+
+    await expect(service.completePasswordReset({
+      email,
+      verificationId: verification.verificationId,
+      password: 'NewPassword1',
+      confirmPassword: 'NewPassword1',
+    })).resolves.toMatchObject({ passwordReset: true });
+
+    const resetSessionCheck = queries.find(({ text }) => text.includes('reset_session_expires_at > GETDATE()'));
+    expect(resetSessionCheck?.text).toContain('reset_session_id = @resetSessionId');
+    expect(resetSessionCheck?.text).not.toMatch(/\bexpires_at\s*>\s*GETDATE\(\)/);
+    expect(resetSessionCheck?.values.get('resetSessionId')).toBe(verification.verificationId);
+    expect(queries.some(({ text }) => text.includes('reset_session_id = NULL'))).toBe(true);
   });
 });

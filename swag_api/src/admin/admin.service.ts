@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
+import * as XLSX from 'xlsx';
 import { assertCleanText } from '../common/profanity';
 import { DatabaseService } from '../database/database.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { hashPassword } from '../common/passwords';
+import { assertPasswordRequirements, hashPassword, passwordMatches } from '../common/passwords';
 
 type ChatMessageRow = {
   id: string;
@@ -30,6 +31,12 @@ type UpdateProfileBody = {
   idType?: string;
   idNumber?: string;
   isActive?: boolean;
+  password?: string;
+  confirmPassword?: string;
+};
+
+type ChangePasswordBody = {
+  currentPassword?: string;
   password?: string;
   confirmPassword?: string;
 };
@@ -255,11 +262,13 @@ export class AdminService {
   }
 
   async orders() {
-    const [hasReceipt, hasReference, hasTracking, hasTrackingUrl] = await Promise.all([
+    await this.ensureOrderPaymentStatusColumn();
+    const [hasReceipt, hasReference, hasTracking, hasTrackingUrl, hasParcelCount] = await Promise.all([
       this.databaseService.columnExists('ORDERS', 'payment_receipt_url'),
       this.databaseService.columnExists('ORDERS', 'payment_reference_number'),
       this.databaseService.columnExists('ORDERS', 'tracking_number'),
       this.databaseService.columnExists('ORDERS', 'tracking_url'),
+      this.databaseService.columnExists('ORDERS', 'parcel_count'),
     ]);
     const hasColorId = await this.databaseService.columnExists('PRODUCTS', 'color_id');
     const productColorJoin = hasColorId
@@ -283,6 +292,7 @@ export class AdminService {
       paymentReference: string | null;
       trackingNumber: string | null;
       trackingUrl: string | null;
+      parcelCount: number;
     }>(`
       SELECT
         CONVERT(varchar(36), o.order_id) AS id,
@@ -291,12 +301,13 @@ export class AdminService {
         CAST(o.total_amount AS float) AS price,
         o.placed_at AS date,
         u.full_name AS customer,
-        CASE WHEN LOWER(os.label) = 'payment confirmed' THEN 'Confirmed' ELSE 'Pending verification' END AS payment,
+        COALESCE(NULLIF(LTRIM(RTRIM(o.payment_status)), ''), 'Pending Verification') AS payment,
         os.label AS status,
         ${hasReceipt ? 'o.payment_receipt_url' : 'NULL'} AS receiptUrl,
         ${hasReference ? 'o.payment_reference_number' : 'NULL'} AS paymentReference,
         ${hasTracking ? 'o.tracking_number' : 'NULL'} AS trackingNumber,
         ${hasTrackingUrl ? 'o.tracking_url' : 'NULL'} AS trackingUrl,
+        ${hasParcelCount ? 'o.parcel_count' : '1'} AS parcelCount,
         firstItem.imageUrl,
         ISNULL(orderSummary.itemCount, 0) AS itemCount,
         orderItems.itemsJson
@@ -374,20 +385,28 @@ export class AdminService {
     });
   }
 
-  async updateOrderStatus(orderId: string, status: string, trackingNumber?: string, trackingUrl?: string, cancellationReason?: string) {
-    const nextStatus = status?.trim();
+  async updateOrderStatus(orderId: string, body: { status?: string; paymentVerification?: string; trackingNumber?: string; trackingUrl?: string; cancellationReason?: string }) {
+    const nextStatus = body.status?.trim() || null;
+    const paymentVerification = body.paymentVerification?.trim().toLowerCase();
+    const verifyPayment = paymentVerification === 'verified';
 
-    if (!nextStatus) {
-      throw new BadRequestException('Order status is required');
+    if (!nextStatus && !verifyPayment) {
+      throw new BadRequestException('Provide an order status or payment verification.');
+    }
+    if (paymentVerification && !verifyPayment) {
+      throw new BadRequestException('Payment verification must be Verified.');
     }
 
+    const { trackingNumber, trackingUrl, cancellationReason } = body;
     await this.ensureOrderTrackingColumns();
+    await this.ensureOrderPaymentStatusColumn();
     if (trackingUrl && !/^https?:\/\//i.test(trackingUrl.trim())) {
       throw new BadRequestException('Tracking link must start with http:// or https://');
     }
-    const current = await this.databaseService.request<{ status: string; userId: string }>((request) =>
+    const current = await this.databaseService.request<{ status: string; userId: string; payment: string }>((request) =>
       request.input('orderId', sql.UniqueIdentifier, orderId).query(`
-        SELECT TOP 1 os.label AS status, CONVERT(varchar(36), o.user_id) AS userId
+        SELECT TOP 1 os.label AS status, CONVERT(varchar(36), o.user_id) AS userId,
+          COALESCE(NULLIF(LTRIM(RTRIM(o.payment_status)), ''), 'Pending Verification') AS payment
         FROM ORDERS o
         INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
         WHERE o.order_id = @orderId
@@ -399,10 +418,10 @@ export class AdminService {
     }
 
     const wasCancelled = current[0].status.toLowerCase().includes('cancel');
-    const willCancel = nextStatus.toLowerCase().includes('cancel');
+    const willCancel = nextStatus?.toLowerCase().includes('cancel') ?? false;
     if (willCancel && !cancellationReason?.trim()) throw new BadRequestException('A cancellation reason is required.');
 
-    await this.databaseService.request((request) =>
+    if (nextStatus) await this.databaseService.request((request) =>
       request.input('status', sql.NVarChar(30), nextStatus).query(`
         IF NOT EXISTS (SELECT 1 FROM ORDER_STATUSES WHERE label = @status)
         BEGIN
@@ -411,10 +430,11 @@ export class AdminService {
       `),
     );
 
-    const updated = await this.databaseService.request<{ id: string }>((request) =>
+    const updated = await this.databaseService.request<{ id: string; status: string; payment: string }>((request) =>
       request
         .input('orderId', sql.UniqueIdentifier, orderId)
         .input('status', sql.NVarChar(30), nextStatus)
+        .input('verifyPayment', sql.Bit, verifyPayment ? 1 : 0)
         .input('wasCancelled', sql.Bit, wasCancelled ? 1 : 0)
         .input('willCancel', sql.Bit, willCancel ? 1 : 0)
         .input('trackingNumber', sql.NVarChar(50), trackingNumber?.trim() || null)
@@ -490,15 +510,26 @@ export class AdminService {
 
           UPDATE ORDERS
           SET
-            status_id = (SELECT TOP 1 status_id FROM ORDER_STATUSES WHERE label = @status),
+            status_id = CASE WHEN @status IS NULL THEN status_id ELSE (SELECT TOP 1 status_id FROM ORDER_STATUSES WHERE label = @status) END,
+            payment_status = CASE WHEN @verifyPayment = 1 THEN 'Verified' ELSE payment_status END,
             tracking_number = CASE WHEN @trackingNumber IS NULL THEN tracking_number ELSE @trackingNumber END,
             tracking_url = CASE WHEN @trackingUrl IS NULL THEN tracking_url ELSE @trackingUrl END,
             cancellation_reason = CASE WHEN @willCancel = 1 THEN @cancellationReason ELSE cancellation_reason END,
             updated_at = GETDATE()
-          OUTPUT CONVERT(varchar(36), inserted.order_id) AS id
           WHERE order_id = @orderId;
 
+          IF @@ROWCOUNT = 0
+            THROW 51021, 'Order status was not saved.', 1;
+
           COMMIT TRANSACTION;
+
+          SELECT
+            CONVERT(varchar(36), o.order_id) AS id,
+            os.label AS status,
+            COALESCE(NULLIF(LTRIM(RTRIM(o.payment_status)), ''), 'Pending Verification') AS payment
+          FROM ORDERS o
+          INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+          WHERE o.order_id = @orderId;
         `),
     );
 
@@ -506,15 +537,13 @@ export class AdminService {
       throw new NotFoundException('Order not found');
     }
 
-    const notification = this.orderNotification(nextStatus);
-    if (notification) void this.notificationsService.notifyOrder(current[0].userId, { ...notification, orderId, eventKey: `order.status.${nextStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, data: { type: 'order', orderId } }).catch(() => undefined);
-    if (current[0].status.trim().toLowerCase() !== 'payment confirmed' && nextStatus.toLowerCase() === 'payment confirmed') {
-      // This admin-only state transition is the sole trusted payment success
-      // point in the current receipt-based GCash flow.
+    const notification = nextStatus ? this.orderNotification(nextStatus) : null;
+    if (notification && nextStatus) void this.notificationsService.notifyOrder(current[0].userId, { ...notification, orderId, eventKey: `order.status.${nextStatus.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`, data: { type: 'order', orderId } }).catch(() => undefined);
+    if (verifyPayment && current[0].payment.toLowerCase() !== 'verified') {
       void this.notificationsService.notifyOrderConfirmation(current[0].userId, orderId).catch(() => undefined);
     }
     if (willCancel) void this.notificationsService.notifyOrder(current[0].userId, { orderId, eventKey: 'order.status.cancelled', title: 'Order Cancelled', body: `Reason: ${cancellationReason?.trim()}`, data: { type: 'order', orderId } }).catch(() => undefined);
-    return { id: orderId, status: nextStatus };
+    return updated[0];
   }
 
   private orderNotification(status: string) {
@@ -528,11 +557,35 @@ export class AdminService {
   }
 
   private async ensureOrderTrackingColumns() {
-    for (const [column, definition] of [['tracking_number', 'NVARCHAR(50) NULL'], ['tracking_url', 'NVARCHAR(500) NULL'], ['cancellation_reason', 'NVARCHAR(500) NULL']]) {
+    for (const [column, definition] of [['tracking_number', 'NVARCHAR(50) NULL'], ['tracking_url', 'NVARCHAR(500) NULL'], ['cancellation_reason', 'NVARCHAR(500) NULL'], ['payment_status', 'NVARCHAR(50) NULL']]) {
       if (!(await this.databaseService.columnExists('ORDERS', column))) {
         await this.databaseService.query(`ALTER TABLE ORDERS ADD ${column} ${definition}`);
       }
     }
+  }
+
+  private async ensureOrderPaymentStatusColumn() {
+    if (!(await this.databaseService.columnExists('ORDERS', 'payment_status'))) {
+      await this.databaseService.query(`ALTER TABLE ORDERS ADD payment_status NVARCHAR(50) NULL`);
+    }
+
+    // The old UI inferred payment success from fulfillment labels. Keep an
+    // already-recorded legacy confirmation, but never use shipping as proof.
+    await this.databaseService.query(`
+      UPDATE o
+      SET payment_status = CASE
+        WHEN LOWER(LTRIM(RTRIM(o.payment_status))) IN ('confirmed', 'verified') THEN 'Verified'
+        WHEN LOWER(LTRIM(RTRIM(o.payment_status))) = 'pending verification' THEN 'Pending Verification'
+        WHEN (o.payment_status IS NULL OR LTRIM(RTRIM(o.payment_status)) = '')
+          AND LOWER(LTRIM(RTRIM(os.label))) IN ('payment confirmed', 'verified') THEN 'Verified'
+        ELSE 'Pending Verification'
+      END
+      FROM ORDERS o
+      INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+      WHERE o.payment_status IS NULL
+        OR LTRIM(RTRIM(o.payment_status)) = ''
+        OR LOWER(LTRIM(RTRIM(o.payment_status))) IN ('confirmed', 'verified', 'pending verification');
+    `);
   }
 
   async reviews() {
@@ -1022,7 +1075,7 @@ export class AdminService {
 
     if (fullName.length < 2 || fullName.length > 150) throw new BadRequestException('Enter an administrator name from 2 to 150 characters.');
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) throw new BadRequestException('Enter a valid administrator email.');
-    if (password.length < 8 || password.length > 64 || !/[A-Z]/.test(password) || !/\d/.test(password)) throw new BadRequestException('Password must be 8 to 64 characters and include an uppercase letter and number.');
+    assertPasswordRequirements(password);
     if (password !== (payload.confirmPassword ?? '')) throw new BadRequestException('Password confirmation does not match.');
 
     const idType = payload.idType?.trim() || null;
@@ -1072,8 +1125,8 @@ export class AdminService {
       throw new BadRequestException('Full name and email are required');
     }
 
-    if (password && password !== confirmPassword) {
-      throw new BadRequestException('Password confirmation does not match');
+    if (password || confirmPassword) {
+      throw new BadRequestException('Use the Change Password section and enter your current password.');
     }
 
     const existing = await this.databaseService.request<{ id: string }>((request) =>
@@ -1102,7 +1155,6 @@ export class AdminService {
       throw new BadRequestException('Selected ID type does not exist');
     }
 
-    const passwordHash = password ? await hashPassword(password) : null;
     await this.databaseService.request((request) => {
       request
         .input('userId', sql.UniqueIdentifier, userId)
@@ -1113,10 +1165,6 @@ export class AdminService {
         .input('idNumber', sql.NVarChar(100), idNumber)
         .input('isActive', sql.Bit, payload.isActive === false ? 0 : 1);
 
-      if (passwordHash) {
-        request.input('passwordHash', sql.NVarChar(255), passwordHash);
-      }
-
       return request.query(`
         UPDATE USERS
         SET
@@ -1126,7 +1174,6 @@ export class AdminService {
           id_type_id = @idTypeId,
           id_number = @idNumber,
           is_active = @isActive
-          ${passwordHash ? ', password_hash = @passwordHash' : ''}
         WHERE user_id = @userId AND is_admin = 1
       `);
     });
@@ -1157,7 +1204,9 @@ export class AdminService {
       throw new BadRequestException('Profile photo is required');
     }
 
-    const profilePhotoUrl = `http://localhost:5000/uploads/profiles/${file.filename}`;
+    // Keep upload URLs relative so web and physical-device clients resolve
+    // them against their configured API host rather than this machine.
+    const profilePhotoUrl = `/uploads/profiles/${file.filename}`;
 
     const updated = await this.databaseService.request((request) =>
       request
@@ -1189,6 +1238,23 @@ export class AdminService {
     }
 
     return updated[0];
+  }
+
+  async changePassword(userId: string, body: ChangePasswordBody) {
+    const currentPassword = body.currentPassword ?? '';
+    const password = body.password ?? '';
+    if (!currentPassword) throw new BadRequestException('Enter your current password.');
+    if (password !== (body.confirmPassword ?? '')) throw new BadRequestException('Password confirmation does not match.');
+    assertPasswordRequirements(password);
+    const admins = await this.databaseService.request<{ passwordHash: string }>((request) => request
+      .input('userId', sql.UniqueIdentifier, userId)
+      .query(`SELECT TOP 1 password_hash AS passwordHash FROM USERS WHERE user_id = @userId AND is_admin = 1 AND is_active = 1`));
+    const admin = admins[0];
+    if (!admin || !(await passwordMatches(currentPassword, admin.passwordHash))) throw new BadRequestException('Your current password is incorrect.');
+    if (await passwordMatches(password, admin.passwordHash)) throw new BadRequestException('Your new password must be different from your current password.');
+    const passwordHash = await hashPassword(password);
+    await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, userId).input('passwordHash', sql.NVarChar(255), passwordHash).query(`UPDATE USERS SET password_hash = @passwordHash WHERE user_id = @userId AND is_admin = 1`));
+    return { passwordChanged: true, signOutRequired: true, message: 'Password changed successfully. Please sign in again.' };
   }
 
   async vouchers() {
@@ -1393,4 +1459,96 @@ export class AdminService {
 
     return supplier;
   }
+
+  private exportExcelBuffer(columns: string[], rows: any[][], sheetName = 'Data'): Buffer {
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([columns, ...rows]);
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  }
+
+  async exportCustomers(search?: string) {
+    let data: any[] = Array.from(await this.customers());
+    if (search) {
+      const lowerSearch = search.toLowerCase();
+      data = data.filter(c => c.name.toLowerCase().includes(lowerSearch) || c.id.toLowerCase().includes(lowerSearch));
+    }
+    const columns = ['Customer ID', 'Name', 'Email', 'Phone', 'Status', 'Orders', 'Address', 'Date Registered'];
+    const rows = data.map(c => [c.id, c.name, c.email, c.phone, c.status, c.orders, c.address, c.createdAt]);
+    return this.exportExcelBuffer(columns, rows, 'Customers');
+  }
+
+  async exportOrders(search?: string, tab?: string) {
+    let data: any[] = Array.from(await this.orders());
+    const activeTab = tab || 'All Orders';
+    const SHIPPING_STATUSES = ["order placed", "order confirmed", "order processed", "ready to ship", "in transit", "out for delivery", "confirmed", "shipped", "shipping"];
+    
+    data = data.filter(o => {
+      const normalizedStatus = o.status?.toLowerCase() || '';
+      const matchesTab =
+        activeTab === "All Orders" ||
+        (activeTab === "Shipping" && SHIPPING_STATUSES.includes(normalizedStatus)) ||
+        (activeTab === "Completed" && ["delivered", "completed"].includes(normalizedStatus)) ||
+        (activeTab === "Cancel" && ["cancelled", "cancel"].includes(normalizedStatus));
+      
+      const matchesSearch = !search || (
+        (o.name?.toLowerCase() || '').includes(search.toLowerCase()) ||
+        (o.id?.toLowerCase() || '').includes(search.toLowerCase()) ||
+        (o.customer?.toLowerCase() || '').includes(search.toLowerCase())
+      );
+      return matchesTab && matchesSearch;
+    });
+
+    const columns = ['Order ID', 'Product', 'Color', 'Price', 'Date', 'Customer', 'Payment Status', 'Order Status', 'Tracking Number', 'Tracking URL'];
+    const rows = data.map(o => [o.id, o.name, o.color, o.price, o.date, o.customer, o.payment, o.status, o.trackingNumber, o.trackingUrl]);
+    return this.exportExcelBuffer(columns, rows, 'Orders');
+  }
+
+  async exportReviews(search?: string) {
+    let data: any[] = Array.from(await this.reviews());
+    if (search) {
+      const lowerSearch = search.toLowerCase();
+      data = data.filter(r => `${r.customer} ${r.orderNumber} ${r.product}`.toLowerCase().includes(lowerSearch));
+    }
+    const columns = ['Review ID', 'Customer', 'Product', 'Order Number', 'Rating', 'Comment', 'Date'];
+    const rows = data.map(r => [r.id, r.customer, r.product, r.orderNumber, r.rating, r.comment, r.date]);
+    return this.exportExcelBuffer(columns, rows, 'Reviews');
+  }
+
+  async exportSuppliers(search?: string, status?: string) {
+    let data: any[] = Array.from(await this.suppliers());
+    const statusFilter = status || 'All';
+    data = data.filter(s => {
+      const matchesSearch = !search || `${s.id} ${s.name} ${s.email} ${s.store} ${s.address}`.toLowerCase().includes(search.toLowerCase());
+      const matchesStatus = statusFilter === 'All' || s.status === statusFilter;
+      return matchesSearch && matchesStatus;
+    });
+    const columns = ['Supplier ID', 'Supplier Name', 'Email', 'Phone', 'Status', 'Store Name', 'Address', 'Date Added'];
+    const rows = data.map(s => [s.id, s.name, s.email, s.phone, s.status, s.store, s.address, s.createdAt]);
+    return this.exportExcelBuffer(columns, rows, 'Suppliers');
+  }
+
+  async exportSalesReport() {
+    const report = await this.salesReport();
+    const wb = XLSX.utils.book_new();
+    
+    const summaryCols = ['Total Sales', 'Total Customers', 'Total Transactions', 'Total Products'];
+    const summaryRows = [[(report.summary as any).totalSales, (report.summary as any).totalCustomers, (report.summary as any).totalTransactions, (report.summary as any).totalProducts]];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([summaryCols, ...summaryRows]), 'Summary');
+
+    const monthlyCols = ['Month', 'Sales', 'Previous Year'];
+    const monthlyRows = report.monthlySales.map((m: any) => [m.month, m.sales, m.previous]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([monthlyCols, ...monthlyRows]), 'Monthly Sales');
+
+    const txnCols = ['ID', 'Client', 'Product', 'Amount', 'Status', 'Date'];
+    const txnRows = report.recentTransactions.map((t: any) => [t.id, t.client, t.product, t.amount, t.status, t.placedAt]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([txnCols, ...txnRows]), 'Recent Transactions');
+
+    const topCols = ['Product', 'Units Sold', 'Revenue'];
+    const topRows = report.topProducts.map((p: any) => [p.name, p.sold, p.revenue]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([topCols, ...topRows]), 'Top Products');
+
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  }
+
 }

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AiOutlineEye, AiOutlineEyeInvisible } from "react-icons/ai";
 import { apiPost } from "../../api.js";
 import { setStoredAdminUser } from "../../session.js";
@@ -7,6 +7,7 @@ import "./Login.css";
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -79,10 +80,11 @@ export default function Login() {
                 />
                 Remember me?
               </label>
-              <a href="#">Forgot Password</a>
+              <Link to="/forgot-password">Forgot Password</Link>
             </div>
 
             {error && <p className="login-error">{error}</p>}
+            {location.state?.message && <p className="login-success">{location.state.message}</p>}
 
             <button disabled={isSubmitting} type="submit">
               {isSubmitting ? "Signing In..." : "Sign In"}

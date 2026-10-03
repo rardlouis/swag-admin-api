@@ -2,6 +2,8 @@ import { CartService } from './cart.service';
 
 type ShippingItem = {
   cartItemId: string;
+  productId: string;
+  productName: string;
   quantity: number;
   resolvedWeightKg: number | null;
   resolvedBulkUnits: number | null;
@@ -11,7 +13,7 @@ function shippingDatabase({
   items,
   province = 'Cavite',
   rate = 160,
-  config = { package_type: 'Big', max_weight_kg: 8, max_bulk_units: 1 },
+  config = { package_label: 'Big', max_weight_kg: 50, max_bulk_units: 12 },
 }: {
   items: ShippingItem[];
   province?: string;
@@ -70,18 +72,18 @@ describe('CartService shipping evaluation', () => {
     expect(result).toEqual(expect.objectContaining({ totalWeightKg: 0.51, totalBulkUnits: 0.66 }));
   });
 
-  it('rejects a cart above the Big weight limit', async () => {
+  it('rejects a single item above the Big weight limit', async () => {
     const database = shippingDatabase({
-      items: [{ cartItemId: '1', productId: 'product-1', productName: 'Product 1', quantity: 2, resolvedWeightKg: 4.1, resolvedBulkUnits: 0.2 }],
+      items: [{ cartItemId: '1', productId: 'product-1', productName: 'Product 1', quantity: 1, resolvedWeightKg: 51, resolvedBulkUnits: 0.2 }],
     });
     const result = await new CartService(database as never).evaluateCheckoutShipping(userId, addressId, ['1']);
 
     expect(result).toEqual(expect.objectContaining({ allowed: false, code: 'WEIGHT_EXCEEDED' }));
   });
 
-  it('rejects a cart above the Big bulk limit', async () => {
+  it('rejects a single item above the Big bulk limit', async () => {
     const database = shippingDatabase({
-      items: [{ cartItemId: '1', productId: 'product-1', productName: 'Product 1', quantity: 2, resolvedWeightKg: 0.2, resolvedBulkUnits: 0.6 }],
+      items: [{ cartItemId: '1', productId: 'product-1', productName: 'Product 1', quantity: 1, resolvedWeightKg: 0.2, resolvedBulkUnits: 13 }],
     });
     const result = await new CartService(database as never).evaluateCheckoutShipping(userId, addressId, ['1']);
 
@@ -99,6 +101,8 @@ describe('CartService shipping evaluation', () => {
       totalWeightKg: 0.79,
       totalBulkUnits: 0.84,
       packageLabel: 'Big',
+      parcelCount: 1,
+      shippingFeePerParcel: 160,
       shippingFee: 160,
       destinationProvince: 'Cavite',
     });
@@ -170,5 +174,33 @@ describe('CartService shipping evaluation', () => {
       code: 'SHIPPING_DATA_MISSING',
       missingShippingProducts: [{ productId: 'product-1', productName: 'Missing Shipping Product' }],
     }));
+  });
+
+  it('splits indivisible units with first-fit decreasing and charges once per parcel', async () => {
+    const database = shippingDatabase({
+      items: [
+        { cartItemId: 'pants', productId: 'pants', productName: 'Pants', quantity: 4, resolvedWeightKg: 0.3, resolvedBulkUnits: 5 },
+        { cartItemId: 'shirt', productId: 'shirt', productName: 'Shirt', quantity: 1, resolvedWeightKg: 0.25, resolvedBulkUnits: 3.5 },
+      ],
+    });
+
+    const result = await new CartService(database as never).evaluateCheckoutShipping(userId, addressId, ['pants', 'shirt']);
+
+    expect(result).toEqual(expect.objectContaining({
+      allowed: true,
+      totalBulkUnits: 23.5,
+      parcelCount: 3,
+      shippingFeePerParcel: 160,
+      shippingFee: 480,
+    }));
+  });
+
+  it('splits on weight while allowing a unit at the inclusive limit', async () => {
+    const database = shippingDatabase({
+      items: [{ cartItemId: '1', productId: 'product-1', productName: 'Product 1', quantity: 2, resolvedWeightKg: 30, resolvedBulkUnits: 1 }],
+    });
+    const result = await new CartService(database as never).evaluateCheckoutShipping(userId, addressId, ['1']);
+
+    expect(result).toEqual(expect.objectContaining({ allowed: true, totalWeightKg: 60, parcelCount: 2, shippingFee: 320 }));
   });
 });

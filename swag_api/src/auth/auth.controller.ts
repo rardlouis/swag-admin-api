@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { SessionAuthGuard, requireOwnership, type SessionIdentity } from '../common/session-auth';
 
@@ -26,6 +26,28 @@ export class AuthController {
 
   @Post('email-otp/verify')
   verifyEmailOtp(@Body() body: { email?: string; code?: string }) { return this.authService.verifyEmailOtp(body.email, body.code); }
+
+  @Post('app/password-reset/send')
+  sendPasswordResetOtp(@Body('email') email: string) { return this.authService.sendPasswordResetOtp(email); }
+
+  @Post('app/password-reset/verify')
+  verifyPasswordResetOtp(@Body() body: { email?: string; code?: string }) { return this.authService.verifyPasswordResetOtp(body.email, body.code); }
+
+  @Post('app/password-reset/complete')
+  completePasswordReset(@Body() body: { email?: string; verificationId?: string; resetSessionId?: string; password?: string; confirmPassword?: string }) {
+    return this.authService.completePasswordReset(body);
+  }
+
+  @Post('admin/password-reset/send')
+  sendAdminPasswordResetOtp(@Body('email') email: string) { return this.authService.sendAdminPasswordResetOtp(email); }
+
+  @Post('admin/password-reset/verify')
+  verifyAdminPasswordResetOtp(@Body() body: { email?: string; code?: string }) { return this.authService.verifyAdminPasswordResetOtp(body.email, body.code); }
+
+  @Post('admin/password-reset/complete')
+  completeAdminPasswordReset(@Body() body: { email?: string; verificationId?: string; resetSessionId?: string; password?: string; confirmPassword?: string }) {
+    return this.authService.completeAdminPasswordReset(body);
+  }
 
   @Post('sms-otp/send')
   sendSmsOtp(@Body('phone') phone: string) { return this.authService.sendSmsOtp(phone); }
@@ -74,5 +96,26 @@ export class AuthController {
   @Post('app/account/reactivate')
   reactivateAppAccount(@Body() body: { email?: string; password?: string }) {
     return this.authService.reactivateAppAccount(body);
+  }
+
+  @Post('app/password/change/send')
+  @UseGuards(SessionAuthGuard)
+  sendChangePasswordOtp(@Req() request: { user?: SessionIdentity }) {
+    if (!request.user || request.user.admin) throw new ForbiddenException('This endpoint is for customer accounts.');
+    return this.authService.sendChangePasswordOtp(request.user.sub);
+  }
+
+  @Post('app/password/change/verify')
+  @UseGuards(SessionAuthGuard)
+  verifyChangePasswordOtp(@Body() body: { code?: string }, @Req() request: { user?: SessionIdentity }) {
+    if (!request.user || request.user.admin) throw new ForbiddenException('This endpoint is for customer accounts.');
+    return this.authService.verifyChangePasswordOtp(request.user.sub, body.code);
+  }
+
+  @Post('app/password/change')
+  @UseGuards(SessionAuthGuard)
+  changeAppPassword(@Body() body: { resetSessionId?: string; password?: string; confirmPassword?: string }, @Req() request: { user?: SessionIdentity }) {
+    if (!request.user || request.user.admin) throw new ForbiddenException('This endpoint is for customer accounts.');
+    return this.authService.changeAppPassword(request.user.sub, body);
   }
 }

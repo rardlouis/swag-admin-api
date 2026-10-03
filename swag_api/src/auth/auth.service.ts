@@ -1,10 +1,10 @@
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
 import { createHash, randomInt, randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { createSessionToken } from '../common/session-auth';
 import { NotificationsService } from '../notifications/notifications.service';
-import { hashPassword, passwordMatches } from '../common/passwords';
+import { assertPasswordRequirements, hashPassword, passwordMatches } from '../common/passwords';
 
 type LoginBody = {
   login?: string;
@@ -38,8 +38,11 @@ type AppRegisterBody = {
   phone_verification_id?: string;
 };
 
+type EmailOtpPurpose = 'registration' | 'password_reset' | 'admin_password_reset' | 'password_change';
+
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
   constructor(private readonly databaseService: DatabaseService, private readonly notificationsService: NotificationsService) {}
 
   async sendEmailOtp(rawEmail: string) {
@@ -58,21 +61,72 @@ export class AuthService {
     if (existingUser[0]) {
       throw new ConflictException('This email is already registered. Log in or use another email.');
     }
-    await this.ensureEmailOtpsTable();
-    if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) throw new BadRequestException('Email verification is not configured.');
-    const latest = await this.databaseService.request<{ secondsSinceCreation: number }>((request) => request.input('email', sql.NVarChar(255), email).query(`SELECT TOP 1 DATEDIFF(SECOND, created_at, GETDATE()) AS secondsSinceCreation FROM EMAIL_OTPS WHERE email = @email ORDER BY created_at DESC`));
-    // Keep both values on SQL Server's clock. Parsing DATETIME values in Node
-    // can shift them by the local time-zone and turn a 60-second cooldown into hours.
-    const secondsUntilResend = latest[0]
-      ? Math.max(0, 60 - Math.max(0, Number(latest[0].secondsSinceCreation ?? 0)))
-      : 0;
-    if (latest[0] && secondsUntilResend > 0) throw new BadRequestException(`Please wait ${secondsUntilResend} seconds before requesting another code.`);
-    const verificationId = randomUUID();
-    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
-    const expiresAt = new Date(Date.now() + 5 * 60_000);
-    await this.databaseService.request((request) => request.input('email', sql.NVarChar(255), email).input('id', sql.UniqueIdentifier, verificationId).input('hash', sql.NVarChar(128), this.otpHash(email, code)).input('expiresAt', sql.DateTime2, expiresAt).query(`UPDATE EMAIL_OTPS SET invalidated_at = GETDATE() WHERE email = @email AND verified_at IS NULL AND invalidated_at IS NULL; INSERT INTO EMAIL_OTPS (verification_id, email, code_hash, expires_at, attempts) VALUES (@id, @email, @hash, @expiresAt, 0);`));
+    return this.sendEmailOtpForPurpose(email, 'registration', 'Your A\'FRO verification code');
+  }
+
+  async sendPasswordResetOtp(rawEmail: string) {
+    return this.sendPasswordResetOtpForAccount(rawEmail, false, 'password_reset');
+  }
+
+  async sendAdminPasswordResetOtp(rawEmail: string) {
+    return this.sendPasswordResetOtpForAccount(rawEmail, true, 'admin_password_reset');
+  }
+
+  private async sendPasswordResetOtpForAccount(rawEmail: string, isAdmin: boolean, purpose: EmailOtpPurpose) {
+    const email = this.normalizedEmail(rawEmail);
+    const user = await this.databaseService.request<{ userId: string }>((request) =>
+      request.input('email', sql.NVarChar(255), email).query(`
+        SELECT TOP 1 CONVERT(varchar(36), user_id) AS userId
+        FROM USERS
+        WHERE LOWER(email) = LOWER(@email) AND is_admin = ${isAdmin ? 1 : 0} AND is_active = 1
+      `),
+    );
+    // Do not reveal whether a customer account exists. The UI can show the
+    // same neutral success message for every syntactically valid email.
+    // Administrator recovery deliberately remains distinct because it is an
+    // internal account-management flow with a separate route and purpose.
+    if (!user[0] && !isAdmin) return { expiresAt: null, resendAfterSeconds: 60 };
+    if (!user[0]) throw new BadRequestException('No active administrator was found for that email address.');
+    return this.sendEmailOtpForPurpose(email, purpose, `Your A'FRO ${isAdmin ? 'administrator ' : ''}password reset code`);
+  }
+
+  private async sendEmailOtpForPurpose(email: string, purpose: EmailOtpPurpose, subject: string) {
+    let verificationId: string;
+    let code: string;
+    let expiresAt: Date;
     try {
-      const response = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', headers: { 'api-key': process.env.BREVO_API_KEY, 'content-type': 'application/json' }, body: JSON.stringify({ sender: { email: process.env.BREVO_SENDER_EMAIL, name: process.env.BREVO_SENDER_NAME || "A'FRO" }, to: [{ email }], subject: "Your A'FRO verification code", htmlContent: `<p>Your A'FRO verification code is:</p><h2>${code}</h2><p>This code expires in 5 minutes. Do not share it with anyone.</p>` }) });
+      await this.ensureEmailOtpsTable();
+      const latest = await this.databaseService.request<{ secondsSinceCreation: number }>((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).query(`SELECT TOP 1 DATEDIFF(SECOND, created_at, GETDATE()) AS secondsSinceCreation FROM EMAIL_OTPS WHERE email = @email AND purpose = @purpose ORDER BY created_at DESC`));
+      // Keep both values on SQL Server's clock. Parsing DATETIME values in Node
+      // can shift them by the local time-zone and turn a 60-second cooldown into hours.
+      const secondsUntilResend = latest[0]
+        ? Math.max(0, 60 - Math.max(0, Number(latest[0].secondsSinceCreation ?? 0)))
+        : 0;
+      if (latest[0] && secondsUntilResend > 0) throw new BadRequestException(`Please wait ${secondsUntilResend} seconds before requesting another code.`);
+      verificationId = randomUUID();
+      code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+      expiresAt = new Date(Date.now() + 5 * 60_000);
+      const invalidatePriorOtp = purpose === 'registration'
+        ? 'verified_at IS NULL'
+        : '1 = 1';
+      await this.databaseService.request((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).input('id', sql.UniqueIdentifier, verificationId).input('hash', sql.NVarChar(128), this.otpHash(email, purpose, code)).query(`
+        UPDATE EMAIL_OTPS
+        SET invalidated_at = GETDATE(), reset_session_id = NULL, reset_session_expires_at = NULL
+        WHERE email = @email AND purpose = @purpose AND ${invalidatePriorOtp} AND invalidated_at IS NULL;
+
+        INSERT INTO EMAIL_OTPS (verification_id, email, purpose, code_hash, expires_at, attempts)
+        VALUES (@id, @email, @purpose, @hash, DATEADD(MINUTE, 5, GETDATE()), 0);
+      `));
+    } catch (error) {
+      if (error instanceof BadRequestException) throw error;
+      // Keep database/schema details out of the API response and never leave
+      // the app with Nest's generic 500 response.
+      this.logger.error('Email OTP storage is unavailable', error instanceof Error ? error.stack : undefined);
+      throw new ServiceUnavailableException('Email verification is temporarily unavailable. Please try again shortly.');
+    }
+    if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) throw new BadRequestException('Email verification is not configured.');
+    try {
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', signal: AbortSignal.timeout(10_000), headers: { 'api-key': process.env.BREVO_API_KEY, 'content-type': 'application/json' }, body: JSON.stringify({ sender: { email: process.env.BREVO_SENDER_EMAIL, name: process.env.BREVO_SENDER_NAME || "A'FRO" }, to: [{ email }], subject, htmlContent: `<p>Your A'FRO code is:</p><h2>${code}</h2><p>This code expires in 5 minutes. Do not share it with anyone.</p>` }) });
       if (!response.ok) throw new Error('Brevo request failed');
     } catch {
       await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, verificationId).query('UPDATE EMAIL_OTPS SET invalidated_at = GETDATE() WHERE verification_id = @id'));
@@ -82,16 +136,52 @@ export class AuthService {
   }
 
   async verifyEmailOtp(rawEmail: string | undefined, rawCode: string | undefined) {
+    return this.verifyEmailOtpForPurpose(rawEmail, rawCode, 'registration');
+  }
+
+  async verifyPasswordResetOtp(rawEmail: string | undefined, rawCode: string | undefined) {
+    return this.verifyEmailOtpForPurpose(rawEmail, rawCode, 'password_reset');
+  }
+
+  async verifyAdminPasswordResetOtp(rawEmail: string | undefined, rawCode: string | undefined) {
+    return this.verifyEmailOtpForPurpose(rawEmail, rawCode, 'admin_password_reset');
+  }
+
+  private async verifyEmailOtpForPurpose(rawEmail: string | undefined, rawCode: string | undefined, purpose: EmailOtpPurpose) {
     const email = this.normalizedEmail(rawEmail ?? ''); const code = rawCode?.trim() ?? '';
     if (!/^\d{6}$/.test(code)) throw new BadRequestException('Enter the complete 6-digit code.');
     await this.ensureEmailOtpsTable();
-    const rows = await this.databaseService.request<{ id: string; codeHash: string; expiresAt: Date; attempts: number }>((request) => request.input('email', sql.NVarChar(255), email).query(`SELECT TOP 1 CONVERT(varchar(36), verification_id) AS id, code_hash AS codeHash, expires_at AS expiresAt, attempts FROM EMAIL_OTPS WHERE email = @email AND verified_at IS NULL AND invalidated_at IS NULL ORDER BY created_at DESC`));
+    const rows = await this.databaseService.request<{ id: string; codeHash: string; secondsRemaining: number; attempts: number }>((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).query(`
+      SELECT TOP 1 CONVERT(varchar(36), verification_id) AS id,
+        code_hash AS codeHash,
+        DATEDIFF(SECOND, GETDATE(), expires_at) AS secondsRemaining,
+        attempts
+      FROM EMAIL_OTPS
+      WHERE email = @email AND purpose = @purpose AND verified_at IS NULL AND invalidated_at IS NULL
+      ORDER BY created_at DESC
+    `));
     const otp = rows[0];
-    if (!otp || new Date(otp.expiresAt).getTime() < Date.now()) throw new BadRequestException('This code has expired. Request a new one.');
+    if (!otp || Number(otp.secondsRemaining) <= 0) throw new BadRequestException('This code has expired. Request a new one.');
     if (Number(otp.attempts) >= 5) throw new BadRequestException('Too many incorrect attempts. Request a new code.');
-    if (this.otpHash(email, code) !== otp.codeHash) { await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, otp.id).query('UPDATE EMAIL_OTPS SET attempts = attempts + 1 WHERE verification_id = @id')); throw new BadRequestException('That code is not correct. Please try again.'); }
-    await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, otp.id).query('UPDATE EMAIL_OTPS SET verified_at = GETDATE() WHERE verification_id = @id'));
-    return { verificationId: otp.id, email };
+    if (this.otpHash(email, purpose, code) !== otp.codeHash) { await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, otp.id).query('UPDATE EMAIL_OTPS SET attempts = attempts + 1, invalidated_at = CASE WHEN attempts + 1 >= 5 THEN GETDATE() ELSE invalidated_at END WHERE verification_id = @id')); throw new BadRequestException('That code is not correct. Please try again.'); }
+    if (purpose === 'registration') {
+      await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, otp.id).query('UPDATE EMAIL_OTPS SET verified_at = GETDATE() WHERE verification_id = @id'));
+      return { verificationId: otp.id, email };
+    }
+
+    const resetSessionId = randomUUID();
+    await this.databaseService.request((request) => request
+      .input('id', sql.UniqueIdentifier, otp.id)
+      .input('resetSessionId', sql.UniqueIdentifier, resetSessionId).query(`
+        UPDATE EMAIL_OTPS
+        SET verified_at = GETDATE(),
+            reset_session_id = @resetSessionId,
+            reset_session_expires_at = DATEADD(MINUTE, 10, GETDATE())
+        WHERE verification_id = @id AND verified_at IS NULL AND invalidated_at IS NULL
+      `));
+    // `verificationId` remains for the existing mobile client contract. It
+    // now carries the reset-session ID, never the consumed OTP row ID.
+    return { verificationId: resetSessionId, resetSessionId, email, resetSessionExpiresInSeconds: 10 * 60 };
   }
 
   async sendSmsOtp(rawPhone: string) {
@@ -494,6 +584,89 @@ export class AuthService {
     return this.appLogin({ email, password: body.password ?? '' });
   }
 
+  async completePasswordReset(body: { email?: string; verificationId?: string; password?: string; confirmPassword?: string }) {
+    return this.completePasswordResetForAccount(body, false, 'password_reset');
+  }
+
+  async completeAdminPasswordReset(body: { email?: string; verificationId?: string; password?: string; confirmPassword?: string }) {
+    return this.completePasswordResetForAccount(body, true, 'admin_password_reset');
+  }
+
+  private async completePasswordResetForAccount(body: { email?: string; verificationId?: string; resetSessionId?: string; password?: string; confirmPassword?: string }, isAdmin: boolean, purpose: EmailOtpPurpose) {
+    const email = this.normalizedEmail(body.email ?? '');
+    const resetSessionId = body.resetSessionId?.trim() ?? body.verificationId?.trim() ?? '';
+    const password = body.password ?? '';
+    if (!this.isUuid(resetSessionId)) throw new BadRequestException('Verify your reset code before setting a new password.');
+    if (password !== (body.confirmPassword ?? '')) throw new BadRequestException('Password confirmation does not match.');
+    assertPasswordRequirements(password);
+    await this.ensureEmailOtpsTable();
+    const verified = await this.databaseService.request<{ count: number }>((request) => request.input('resetSessionId', sql.UniqueIdentifier, resetSessionId).input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).query(`
+      SELECT COUNT(*) AS count FROM EMAIL_OTPS
+      WHERE reset_session_id = @resetSessionId AND email = @email AND purpose = @purpose
+        AND verified_at IS NOT NULL AND invalidated_at IS NULL
+        AND reset_session_expires_at > GETDATE()
+    `));
+    if (!Number(verified[0]?.count)) throw new BadRequestException('This password-reset session has expired. Request a new code.');
+    const users = await this.databaseService.request<{ userId: string; passwordHash: string }>((request) => request.input('email', sql.NVarChar(255), email).query(`SELECT TOP 1 CONVERT(varchar(36), user_id) AS userId, password_hash AS passwordHash FROM USERS WHERE LOWER(email) = LOWER(@email) AND is_admin = ${isAdmin ? 1 : 0} AND is_active = 1`));
+    const user = users[0];
+    if (!user) throw new BadRequestException(`No active ${isAdmin ? 'administrator' : 'account'} was found for that email address.`);
+    if (await passwordMatches(password, user.passwordHash)) throw new BadRequestException('Your new password must be different from your current password.');
+    const passwordHash = await hashPassword(password);
+    await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, user.userId).input('passwordHash', sql.NVarChar(255), passwordHash).input('resetSessionId', sql.UniqueIdentifier, resetSessionId).query(`
+      UPDATE USERS SET password_hash = @passwordHash WHERE user_id = @userId;
+      UPDATE EMAIL_OTPS
+      SET invalidated_at = GETDATE(), reset_session_id = NULL, reset_session_expires_at = NULL
+      WHERE reset_session_id = @resetSessionId AND invalidated_at IS NULL;
+    `));
+    return { passwordReset: true, message: 'Password reset successfully. Please sign in with your new password.' };
+  }
+
+  async sendChangePasswordOtp(userId: string) {
+    const users = await this.databaseService.request<{ email: string }>((request) => request.input('userId', sql.UniqueIdentifier, userId).query(`SELECT TOP 1 email FROM USERS WHERE user_id = @userId AND is_admin = 0 AND is_active = 1`));
+    const user = users[0];
+    if (!user) throw new BadRequestException('User not found.');
+    return this.sendEmailOtpForPurpose(user.email, 'password_change', `Your A'FRO password change code`);
+  }
+
+  async verifyChangePasswordOtp(userId: string, rawCode: string | undefined) {
+    const users = await this.databaseService.request<{ email: string }>((request) => request.input('userId', sql.UniqueIdentifier, userId).query(`SELECT TOP 1 email FROM USERS WHERE user_id = @userId AND is_admin = 0 AND is_active = 1`));
+    const user = users[0];
+    if (!user) throw new BadRequestException('User not found.');
+    return this.verifyEmailOtpForPurpose(user.email, rawCode, 'password_change');
+  }
+
+  async changeAppPassword(userId: string, body: { resetSessionId?: string; password?: string; confirmPassword?: string }) {
+    const resetSessionId = body.resetSessionId?.trim() ?? '';
+    const password = body.password ?? '';
+    if (!this.isUuid(resetSessionId)) throw new BadRequestException('Verify your change password code before setting a new password.');
+    if (password !== (body.confirmPassword ?? '')) throw new BadRequestException('Password confirmation does not match.');
+    assertPasswordRequirements(password);
+
+    const users = await this.databaseService.request<{ email: string, passwordHash: string }>((request) => request.input('userId', sql.UniqueIdentifier, userId).query(`SELECT TOP 1 email, password_hash AS passwordHash FROM USERS WHERE user_id = @userId AND is_admin = 0 AND is_active = 1`));
+    const user = users[0];
+    if (!user) throw new UnauthorizedException('User not found.');
+
+    await this.ensureEmailOtpsTable();
+    const verified = await this.databaseService.request<{ count: number }>((request) => request.input('resetSessionId', sql.UniqueIdentifier, resetSessionId).input('email', sql.NVarChar(255), user.email).input('purpose', sql.NVarChar(32), 'password_change').query(`
+      SELECT COUNT(*) AS count FROM EMAIL_OTPS
+      WHERE reset_session_id = @resetSessionId AND email = @email AND purpose = @purpose
+        AND verified_at IS NOT NULL AND invalidated_at IS NULL
+        AND reset_session_expires_at > GETDATE()
+    `));
+    if (!Number(verified[0]?.count)) throw new BadRequestException('This password-change session has expired. Request a new code.');
+
+    if (await passwordMatches(password, user.passwordHash)) throw new BadRequestException('Your new password must be different from your current password.');
+    const passwordHash = await hashPassword(password);
+    
+    await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, userId).input('passwordHash', sql.NVarChar(255), passwordHash).input('resetSessionId', sql.UniqueIdentifier, resetSessionId).query(`
+      UPDATE USERS SET password_hash = @passwordHash WHERE user_id = @userId;
+      UPDATE EMAIL_OTPS
+      SET invalidated_at = GETDATE(), reset_session_id = NULL, reset_session_expires_at = NULL
+      WHERE reset_session_id = @resetSessionId AND invalidated_at IS NULL;
+    `));
+    return { passwordChanged: true, signOutRequired: true, message: 'Password changed successfully. Please sign in again.' };
+  }
+
   private async ensureAccountDeletionColumns() {
     await this.databaseService.query(`
       IF COL_LENGTH('USERS', 'deactivated_at') IS NULL ALTER TABLE USERS ADD deactivated_at DATETIME2 NULL;
@@ -887,9 +1060,7 @@ export class AuthService {
     }
 
     if (password !== undefined) {
-      if (password.length < 8 || password.length > 64 || !/[A-Z]/.test(password) || !/\d/.test(password)) {
-        throw new BadRequestException('Password must be 8 to 64 characters and include an uppercase letter and number');
-      }
+      assertPasswordRequirements(password);
     }
 
     const nameParts = fullName.trim().split(/\s+/);
@@ -991,26 +1162,54 @@ export class AuthService {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
   }
 
-  private otpHash(email: string, code: string) {
-    return createHash('sha256').update(`${email}:${code}`).digest('hex');
+  private otpHash(email: string, purpose: string, code: string) {
+    return createHash('sha256').update(`${email}:${purpose}:${code}`).digest('hex');
   }
 
   private async ensureEmailOtpsTable() {
+    // Keep creation and upgrades as separate statements. The project has
+    // deployed older EMAIL_OTPS tables without `purpose`; a single mixed DDL
+    // batch can fail before the column upgrade is applied on SQL Server.
     await this.databaseService.query(`
       IF OBJECT_ID('dbo.EMAIL_OTPS', 'U') IS NULL
       BEGIN
         CREATE TABLE dbo.EMAIL_OTPS (
           verification_id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
           email NVARCHAR(255) NOT NULL,
+          purpose NVARCHAR(32) NOT NULL,
           code_hash NVARCHAR(128) NOT NULL,
           expires_at DATETIME2 NOT NULL,
           attempts INT NOT NULL DEFAULT 0,
           created_at DATETIME2 NOT NULL DEFAULT GETDATE(),
           verified_at DATETIME2 NULL,
-          invalidated_at DATETIME2 NULL
+          invalidated_at DATETIME2 NULL,
+          reset_session_id UNIQUEIDENTIFIER NULL,
+          reset_session_expires_at DATETIME2 NULL
         );
-        CREATE INDEX IX_EMAIL_OTPS_EMAIL_CREATED ON dbo.EMAIL_OTPS (email, created_at DESC);
       END
+    `);
+
+    if (!(await this.databaseService.columnExists('EMAIL_OTPS', 'purpose'))) {
+      await this.databaseService.query(`ALTER TABLE dbo.EMAIL_OTPS ADD purpose NVARCHAR(32) NULL`);
+      await this.databaseService.query(`UPDATE dbo.EMAIL_OTPS SET purpose = 'registration' WHERE purpose IS NULL`);
+      await this.databaseService.query(`ALTER TABLE dbo.EMAIL_OTPS ALTER COLUMN purpose NVARCHAR(32) NOT NULL`);
+    }
+
+    if (!(await this.databaseService.columnExists('EMAIL_OTPS', 'reset_session_id'))) {
+      await this.databaseService.query(`ALTER TABLE dbo.EMAIL_OTPS ADD reset_session_id UNIQUEIDENTIFIER NULL`);
+    }
+    if (!(await this.databaseService.columnExists('EMAIL_OTPS', 'reset_session_expires_at'))) {
+      await this.databaseService.query(`ALTER TABLE dbo.EMAIL_OTPS ADD reset_session_expires_at DATETIME2 NULL`);
+    }
+
+    await this.databaseService.query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name = 'IX_EMAIL_OTPS_EMAIL_PURPOSE_CREATED'
+          AND object_id = OBJECT_ID('dbo.EMAIL_OTPS')
+      )
+        CREATE INDEX IX_EMAIL_OTPS_EMAIL_PURPOSE_CREATED
+          ON dbo.EMAIL_OTPS (email, purpose, created_at DESC)
     `);
   }
 
@@ -1040,7 +1239,7 @@ export class AuthService {
     const verified = await this.databaseService.request<{ count: number }>((request) =>
       request.input('email', sql.NVarChar(255), email).input('id', sql.UniqueIdentifier, verificationId).query(`
         SELECT COUNT(*) AS count FROM EMAIL_OTPS
-        WHERE verification_id = @id AND email = @email AND verified_at IS NOT NULL AND invalidated_at IS NULL
+        WHERE verification_id = @id AND email = @email AND purpose = 'registration' AND verified_at IS NOT NULL AND invalidated_at IS NULL
       `),
     );
     if (!Number(verified[0]?.count)) throw new BadRequestException('Verify your email before creating an account.');

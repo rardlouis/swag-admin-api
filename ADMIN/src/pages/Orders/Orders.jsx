@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { apiGet, apiPatch, formatDate, formatPeso, imageUrl } from "../../api.js";
+import { apiGet, apiPatch, formatDate, formatPeso, imageUrl, apiDownload } from "../../api.js";
 import {
   MdSearch, MdFilterList, MdFileDownload,
   MdVisibility, MdEdit, MdDelete, MdUnfoldMore,
@@ -14,6 +14,20 @@ const SHIPPING_STATUSES = ["order placed", "order confirmed", "order processed",
 const PAGE_SIZE = 10;
 
 export default function Orders() {
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = async () => {
+    try {
+      setIsExporting(true);
+      const params = new URLSearchParams();
+      if (typeof search !== 'undefined' && search) params.append('search', search);
+      if (typeof activeTab !== 'undefined' && activeTab) params.append('tab', activeTab);
+      await apiDownload(`/admin/export/orders?${params.toString()}`, `SWAG_Orders_${new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (err) {
+      alert(err.message || 'Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -82,7 +96,9 @@ export default function Orders() {
 
     try {
       const draft = trackingDrafts[orderId] ?? {};
-      await apiPatch(`/admin/orders/${orderId}/status`, { status, trackingNumber: draft.trackingNumber, trackingUrl: draft.trackingUrl });
+      const saved = await apiPatch(`/admin/orders/${orderId}/status`, { status, trackingNumber: draft.trackingNumber, trackingUrl: draft.trackingUrl });
+      setOrders((current) => current.map((order) => order.id === orderId ? { ...order, status: saved.status, payment: saved.payment } : order));
+      setDetailOrder((current) => current?.id === orderId ? { ...current, status: saved.status, payment: saved.payment } : current);
       return true;
     } catch (err) {
       setOrders(previousOrders);
@@ -94,7 +110,7 @@ export default function Orders() {
   const handleStatusSelect = (orderId, status) => {
     setError("");
     if (status === "In Transit") {
-      setOrders((current) => current.map((order) => (order.id === orderId ? { ...order, status } : order)));
+      void handleStatusChange(orderId, status);
       return;
     }
     if (status === 'Cancelled') { setCancelOrder(orderId); setCancellationReason(''); return; }
@@ -105,12 +121,13 @@ export default function Orders() {
     if (!window.confirm(`Confirm the payment for order ${order.id}?`)) return;
     setError("");
     try {
-      await apiPatch(`/admin/orders/${order.id}/status`, { status: "Payment Confirmed" });
+      const saved = await apiPatch(`/admin/orders/${order.id}/status`, { status: "Payment Confirmed", paymentVerification: "Verified" });
+      if (saved.payment !== 'Verified') throw new Error('Payment verification was not saved. Please refresh and try again.');
       setOrders((current) => current.map((item) => item.id === order.id
-        ? { ...item, payment: "Confirmed", status: "Payment Confirmed" }
+        ? { ...item, payment: saved.payment, status: saved.status }
         : item));
       setDetailOrder((current) => current?.id === order.id
-        ? { ...current, payment: "Confirmed", status: "Payment Confirmed" }
+        ? { ...current, payment: saved.payment, status: saved.status }
         : current);
     } catch (err) {
       setError(err.message || "Could not confirm this payment.");
@@ -120,7 +137,7 @@ export default function Orders() {
   const confirmCancellation = async () => {
     if (!cancellationReason.trim()) { setError('Enter a cancellation reason.'); return; }
     const saved = await apiPatch(`/admin/orders/${cancelOrder}/status`, { status: 'Cancelled', cancellationReason });
-    if (saved) { setOrders((current) => current.map((order) => order.id === cancelOrder ? { ...order, status: 'Cancelled' } : order)); setCancelOrder(null); }
+    if (saved) { setOrders((current) => current.map((order) => order.id === cancelOrder ? { ...order, status: saved.status, payment: saved.payment } : order)); setCancelOrder(null); }
   };
 
   const saveTracking = async (orderId) => {
@@ -169,7 +186,7 @@ export default function Orders() {
           </div>
           <div className="orders-actions">
             <button className="btn-outline"><MdFilterList size={16} /> Filter</button>
-            <button className="btn-outline"><MdFileDownload size={16} /> Export</button>
+            <button className="btn-outline" onClick={handleExport} disabled={isExporting}><MdFileDownload size={16} /> {isExporting ? "Exporting..." : "Export"}</button>
           </div>
         </div>
 
@@ -248,10 +265,10 @@ export default function Orders() {
                 <td className="date-cell">{formatDate(order.date)}</td>
                 <td>
                   <div className="payment-verification">
-                    <span className={`status-badge ${order.payment === "Confirmed" ? "payment-paid" : "payment-unpaid"}`}>
+                    <span className={`status-badge ${order.payment === "Verified" ? "payment-paid" : "payment-unpaid"}`}>
                       {order.payment}
                     </span>
-                    {order.payment === "Pending verification" ? (
+                    {order.payment === "Pending Verification" ? (
                       <button className="payment-verify-button" type="button" onClick={() => void confirmPayment(order)}>
                         Verify
                       </button>
@@ -337,7 +354,7 @@ export default function Orders() {
             <h3>Order details</h3>
             <p><strong>Customer:</strong> {detailOrder.customer}</p>
             <p><strong>Payment:</strong> {detailOrder.payment} {detailOrder.paymentReference ? `(${detailOrder.paymentReference})` : ''}</p>
-            {detailOrder.payment === "Pending verification" ? <button className="tracking-save-button" type="button" onClick={() => void confirmPayment(detailOrder)}>Confirm payment</button> : null}
+            {detailOrder.payment === "Pending Verification" ? <button className="tracking-save-button" type="button" onClick={() => void confirmPayment(detailOrder)}>Confirm payment</button> : null}
             <p><strong>Status:</strong> {detailOrder.status}</p>
             {detailOrder.trackingNumber ? <p><strong>Tracking:</strong> {detailOrder.trackingNumber}</p> : null}
             {detailOrder.trackingUrl ? <p><a href={detailOrder.trackingUrl} target="_blank" rel="noreferrer">Open J&T tracking</a></p> : null}

@@ -12,7 +12,7 @@ import {
   MdUnfoldMore,
   MdVisibility,
 } from "react-icons/md";
-import { apiDelete, apiGet } from "../../api.js";
+import { apiDelete, apiGet, apiDownload } from "../../api.js";
 import "./Suppliers.css";
 
 export default function Suppliers() {
@@ -68,26 +68,19 @@ export default function Suppliers() {
     }
   };
 
-  const exportSuppliers = () => {
-    const headers = ["ID", "Supplier Name", "Email", "Phone", "Status", "Store Name", "Address"];
-    const rows = filtered.map((supplier) => [
-      supplier.id,
-      supplier.name,
-      supplier.email,
-      supplier.phone,
-      supplier.status,
-      supplier.store,
-      supplier.address,
-    ]);
-    const csv = [headers, ...rows]
-      .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(","))
-      .join("\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "swag-suppliers.csv";
-    link.click();
-    URL.revokeObjectURL(url);
+  const [isExporting, setIsExporting] = useState(false);
+  const exportSuppliers = async () => {
+    try {
+      setIsExporting(true);
+      const params = new URLSearchParams();
+      if (search) params.append("search", search);
+      if (statusFilter) params.append("status", statusFilter);
+      await apiDownload(`/admin/export/suppliers?${params.toString()}`, `SWAG_Suppliers_${new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (err) {
+      alert(err.message || "Export failed");
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -119,9 +112,7 @@ export default function Suppliers() {
                 <option value="Inactive">Inactive</option>
               </select>
             </label>
-            <button className="supplier-btn-outline" onClick={exportSuppliers} type="button">
-              Export <MdFileDownload size={16} />
-            </button>
+            <button className="supplier-btn-outline" onClick={exportSuppliers} type="button" disabled={isExporting}> {isExporting ? "Exporting..." : "Export"} <MdFileDownload size={16} /></button>
             <button
               className="supplier-btn-primary"
               onClick={() => navigate("/supplier/add")}

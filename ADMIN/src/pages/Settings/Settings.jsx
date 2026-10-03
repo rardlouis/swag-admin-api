@@ -29,8 +29,6 @@ const buildInitialSettings = (user) => ({
   isActive: user?.isActive ?? user?.is_active ?? true,
   isAdmin: user?.isAdmin ?? user?.is_admin ?? true,
   allowNotifications: false,
-  password: "",
-  confirmPassword: "",
 });
 
 export default function Settings() {
@@ -48,6 +46,8 @@ export default function Settings() {
   const [idTypes, setIdTypes] = useState([]);
   const [newAdmin, setNewAdmin] = useState({ fullName: "", email: "", phone: "", idType: "", idNumber: "", password: "", confirmPassword: "" });
   const [creatingAdmin, setCreatingAdmin] = useState(false);
+  const [passwordForm, setPasswordForm] = useState({ currentPassword: "", password: "", confirmPassword: "" });
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
 
   useEffect(() => {
     apiGet("/admin/id-types").then(setIdTypes).catch(() => setIdTypes([]));
@@ -64,11 +64,6 @@ export default function Settings() {
 
     if (!adminUser?.id) {
       setSaveError("No logged-in admin session found. Please log in again.");
-      return;
-    }
-
-    if (settings.password && settings.password !== settings.confirmPassword) {
-      setSaveError("Passwords do not match.");
       return;
     }
 
@@ -134,6 +129,29 @@ export default function Settings() {
     const permission = await Notification.requestPermission();
     setNotificationStatus(permission);
     updateField("allowNotifications", permission === "granted");
+  };
+
+  const changePassword = async (event) => {
+    event.preventDefault();
+    setSaveStatus("");
+    setSaveError("");
+    if (passwordForm.password !== passwordForm.confirmPassword) {
+      setSaveError("Passwords do not match.");
+      return;
+    }
+    setIsChangingPassword(true);
+    try {
+      await apiPost("/admin/password/change", passwordForm);
+      sessionStorage.removeItem("swag_admin_token");
+      sessionStorage.removeItem("swag_admin_user");
+      localStorage.removeItem("swag_admin_token");
+      localStorage.removeItem("swag_admin_user");
+      window.location.replace("/login");
+    } catch (err) {
+      setSaveError(err.message || "Unable to change password.");
+    } finally {
+      setIsChangingPassword(false);
+    }
   };
 
   const createAdmin = async (event) => {
@@ -287,32 +305,40 @@ export default function Settings() {
         <section className="settings-card">
           <div className="settings-card-head">
             <h2>Security</h2>
-            <p>Leave password fields blank to keep your current password.</p>
+            <p>Change your password using your current password for confirmation.</p>
           </div>
+
+          <label className="settings-field">
+            <span><MdLock size={15} /> Current Password</span>
+            <input
+              type="password"
+              value={passwordForm.currentPassword}
+              onChange={(e) => setPasswordForm((current) => ({ ...current, currentPassword: e.target.value }))}
+              placeholder="Enter current password"
+            />
+          </label>
 
           <label className="settings-field">
             <span><MdLock size={15} /> New Password</span>
             <input
               type="password"
-              value={settings.password}
-              onChange={(e) => updateField("password", e.target.value)}
-              placeholder="Enter new password"
+              value={passwordForm.password}
+              onChange={(e) => setPasswordForm((current) => ({ ...current, password: e.target.value }))}
+              placeholder="8–64 characters, uppercase letter, and number"
             />
           </label>
 
           <label className="settings-field">
-            <span><MdSecurity size={15} /> Confirm Password</span>
-            <input
-              type="password"
-              value={settings.confirmPassword}
-              onChange={(e) => updateField("confirmPassword", e.target.value)}
-              placeholder="Confirm new password"
-            />
+            <span><MdSecurity size={15} /> Confirm New Password</span>
+            <input type="password" value={passwordForm.confirmPassword} onChange={(e) => setPasswordForm((current) => ({ ...current, confirmPassword: e.target.value }))} placeholder="Confirm new password" />
           </label>
 
           <div className="settings-security-note">
-            Password changes are saved only when both fields match.
+            Your new password must be 8–64 characters and include an uppercase letter and number.
           </div>
+          <button className="settings-save-btn" disabled={isChangingPassword} type="button" onClick={changePassword}>
+            {isChangingPassword ? "Changing password..." : "Change Password"}
+          </button>
         </section>
 
         <section className="settings-card">

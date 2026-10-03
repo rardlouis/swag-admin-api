@@ -159,6 +159,12 @@ body, html { height: 100%; width: 100%; }
   line-height: 1.35;
 }
 
+.login-success, .reset-status { color: #16743a; font-size: 12px; line-height: 1.35; }
+.reset-title { color: #1a3a6b; font-size: 24px; margin-top: 4px; }
+.reset-copy { color: #555; font-size: 13px; line-height: 1.5; margin-bottom: 4px; }
+.reset-back { color: #2563eb; font-size: 13px; margin-top: 6px; text-align: center; text-decoration: none; }
+.reset-link-button { background: transparent !important; color: #2563eb !important; margin: 0 !important; padding: 0 !important; text-align: right; }
+
 .login-right {
   background: #1a3a6b;
   width: 50%;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiDelete, apiGet, formatDate } from "../../api.js";
+import { apiDelete, apiGet, formatDate, apiDownload } from "../../api.js";
 import {
   MdChevronLeft,
   MdChevronRight,
@@ -15,6 +15,19 @@ import {
 import "./Reviews.css";
 
 export default function Reviews() {
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = async () => {
+    try {
+      setIsExporting(true);
+      const params = new URLSearchParams();
+      if (typeof search !== 'undefined' && search) params.append('search', search);
+      await apiDownload(`/admin/export/reviews?${params.toString()}`, `SWAG_Reviews_${new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (err) {
+      alert(err.message || 'Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState([]);
@@ -77,9 +90,7 @@ export default function Reviews() {
             <button className="reviews-btn-outline" type="button">
               Filter <MdFilterList size={15} />
             </button>
-            <button className="reviews-btn-outline" type="button">
-              Export <MdFileDownload size={15} />
-            </button>
+            <button className="reviews-btn-outline" type="button" onClick={handleExport} disabled={isExporting}> {isExporting ? "Exporting..." : "Export"} <MdFileDownload size={15} /></button>
           </div>
         </div>
 

@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
+import * as XLSX from 'xlsx';
 import { assertCleanText } from '../common/profanity';
 import { DatabaseService } from '../database/database.service';
 import { CreateProductDto } from './dto/create-product.dto';
@@ -24,7 +25,7 @@ export class ProductsService {
   uploadedImages(files: UploadedProductFile[]) {
     return files.map((file) => ({
       filename: file.filename,
-      imageUrl: `http://localhost:5000/uploads/products/${file.filename}`,
+      imageUrl: `/uploads/products/${file.filename}`,
     }));
   }
 
@@ -904,4 +905,27 @@ export class ProductsService {
       );
     }
   }
+
+  async exportProducts(search?: string, tab?: string) {
+    let data: any[] = Array.from(await this.findAll());
+    const activeTab = tab || 'All';
+    data = data.filter((p: any) => {
+      const matchesSearch = !search || p.name.toLowerCase().includes(search.toLowerCase()) || p.id.toLowerCase().includes(search.toLowerCase());
+      const matchesTab =
+        activeTab.toLowerCase() === 'all' || activeTab.toLowerCase() === 'all products' ||
+        (activeTab.toLowerCase() === 'active' && p.isActive) ||
+        (activeTab.toLowerCase() === 'inactive' && !p.isActive) ||
+        (activeTab.toLowerCase().replace(' ', '-') === 'low-stock' && p.qty < 10);
+      return matchesSearch && matchesTab;
+    });
+    
+    const columns = ['Product ID', 'Name', 'Price', 'Stock', 'Brand', 'Category', 'Gender', 'Status', 'Date Added'];
+    const rows = data.map((p: any) => [p.id, p.name, p.price, p.qty, p.brand || '-', p.category, p.gender || '-', p.isActive ? 'Active' : 'Inactive', p.createdAt]);
+    
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([columns, ...rows]);
+    XLSX.utils.book_append_sheet(wb, ws, 'Products');
+    return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  }
+
 }

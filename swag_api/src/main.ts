@@ -48,6 +48,9 @@ async function bootstrap() {
   });
   app.setGlobalPrefix('api');
 
-  await app.listen(process.env.PORT ?? 5000);
+  // Bind all interfaces by default so a physical Expo device can reach a
+  // development server through the configured LAN/tunnel base URL. Deployments
+  // can narrow this with HOST without changing client code.
+  await app.listen(process.env.PORT ?? 5000, process.env.HOST ?? '0.0.0.0');
 }
 bootstrap();

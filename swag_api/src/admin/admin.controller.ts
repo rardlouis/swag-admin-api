@@ -1,9 +1,12 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { AdminService } from './admin.service';
-import { AdminGuard } from '../common/session-auth';
+import { AdminGuard, type SessionIdentity } from '../common/session-auth';
+import { Res, StreamableFile, Query } from '@nestjs/common';
+import type { Response } from 'express';
+
 
 type UploadedProfileFile = {
   filename: string;
@@ -41,8 +44,8 @@ export class AdminController {
   }
 
   @Patch('orders/:id/status')
-  updateOrderStatus(@Param('id') id: string, @Body() body: { status?: string; trackingNumber?: string; trackingUrl?: string; cancellationReason?: string }) {
-    return this.adminService.updateOrderStatus(id, body.status ?? '', body.trackingNumber, body.trackingUrl, body.cancellationReason);
+  updateOrderStatus(@Param('id') id: string, @Body() body: { status?: string; paymentVerification?: string; trackingNumber?: string; trackingUrl?: string; cancellationReason?: string }) {
+    return this.adminService.updateOrderStatus(id, body);
   }
 
   @Get('reviews')
@@ -145,6 +148,11 @@ export class AdminController {
     return this.adminService.updateProfile(id, body);
   }
 
+  @Post('password/change')
+  changePassword(@Body() body: { currentPassword?: string; password?: string; confirmPassword?: string }, @Req() request: { user: SessionIdentity }) {
+    return this.adminService.changePassword(request.user.sub, body);
+  }
+
   @Post('profile/:id/photo')
   @UseInterceptors(
     FileInterceptor('photo', {
@@ -170,4 +178,55 @@ export class AdminController {
   updateProfilePhoto(@Param('id') id: string, @UploadedFile() file: UploadedProfileFile) {
     return this.adminService.updateProfilePhoto(id, file);
   }
+
+  @Get('export/customers')
+  async exportCustomers(@Query('search') search: string, @Res({ passthrough: true }) res: Response) {
+    const buffer = await this.adminService.exportCustomers(search);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="SWAG_Customers_${new Date().toISOString().split('T')[0]}.xlsx"`
+    });
+    return new StreamableFile(buffer as Uint8Array);
+  }
+
+  @Get('export/orders')
+  async exportOrders(@Query('search') search: string, @Query('tab') tab: string, @Res({ passthrough: true }) res: Response) {
+    const buffer = await this.adminService.exportOrders(search, tab);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="SWAG_Orders_${new Date().toISOString().split('T')[0]}.xlsx"`
+    });
+    return new StreamableFile(buffer as Uint8Array);
+  }
+
+  @Get('export/reviews')
+  async exportReviews(@Query('search') search: string, @Res({ passthrough: true }) res: Response) {
+    const buffer = await this.adminService.exportReviews(search);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="SWAG_Reviews_${new Date().toISOString().split('T')[0]}.xlsx"`
+    });
+    return new StreamableFile(buffer as Uint8Array);
+  }
+
+  @Get('export/suppliers')
+  async exportSuppliers(@Query('search') search: string, @Query('status') status: string, @Res({ passthrough: true }) res: Response) {
+    const buffer = await this.adminService.exportSuppliers(search, status);
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="SWAG_Suppliers_${new Date().toISOString().split('T')[0]}.xlsx"`
+    });
+    return new StreamableFile(buffer as Uint8Array);
+  }
+
+  @Get('export/sales-report')
+  async exportSalesReport(@Res({ passthrough: true }) res: Response) {
+    const buffer = await this.adminService.exportSalesReport();
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="SWAG_Sales_Report_${new Date().toISOString().split('T')[0]}.xlsx"`
+    });
+    return new StreamableFile(buffer as Uint8Array);
+  }
+
 }

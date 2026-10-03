@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiDelete, apiGet } from "../../api.js";
+import { apiDelete, apiGet, apiDownload } from "../../api.js";
 import {
   MdSearch,
   MdFilterList,
@@ -18,6 +18,19 @@ import "./Customers.css";
 const PAGE_SIZE_OPTIONS = [10, 20, 30];
 
 export default function Customer() {
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = async () => {
+    try {
+      setIsExporting(true);
+      const params = new URLSearchParams();
+      if (typeof search !== 'undefined' && search) params.append('search', search);
+      await apiDownload(`/admin/export/customers?${params.toString()}`, `SWAG_Customers_${new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (err) {
+      alert(err.message || 'Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const navigate = useNavigate();
   const [search, setSearch]         = useState("");
   const [selected, setSelected]     = useState([]);
@@ -89,7 +102,7 @@ export default function Customer() {
         </div>
         <div className="customers-actions">
           <button className="btn-outline"><MdFilterList size={15} /> Filter</button>
-          <button className="btn-outline"><MdFileDownload size={15} /> Export</button>
+          <button className="btn-outline" onClick={handleExport} disabled={isExporting}><MdFileDownload size={15} /> {isExporting ? "Exporting..." : "Export"}</button>
           <button className="btn-primary" onClick={() => navigate("/customers/manage")}>
             <MdEdit size={15} /> Manage Customer
           </button>

@@ -1,3 +1,4 @@
+import { apiDownload } from "../../api.js";
 import {
   MdArrowBack,
   MdDownload,
@@ -45,6 +46,17 @@ function MetricCard({ title, value, icon, accent, children }) {
 }
 
 export default function SalesReport() {
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = async () => {
+    try {
+      setIsExporting(true);
+      await apiDownload(`/admin/export/sales-report`, `SWAG_Sales_Report_${new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (err) {
+      alert(err.message || 'Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const [report, setReport] = useState({
     summary: {}, monthlySales: [], monthlyTransactions: [], recentTransactions: [], topProducts: [],
   });
@@ -77,10 +89,7 @@ export default function SalesReport() {
             Dashboard <span>›</span> <strong>Sales Report</strong>
           </p>
         </div>
-        <button className="sales-export-btn" type="button">
-          <MdDownload size={17} />
-          Export Report
-        </button>
+        <button className="sales-export-btn" type="button" onClick={handleExport} disabled={isExporting}><MdDownload size={17} /> {isExporting ? "Exporting..." : "Export Report"}</button>
       </div>
 
       <div className="sales-grid">

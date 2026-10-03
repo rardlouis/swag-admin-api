@@ -1,3 +1,4 @@
+import { apiDownload } from "../../api.js";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { apiDelete, apiGet, apiPatch, formatDate, formatPeso } from "../../api.js";
@@ -16,6 +17,20 @@ const COLOR_MAP = {
 };
 
 export default function Products() {
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = async () => {
+    try {
+      setIsExporting(true);
+      const params = new URLSearchParams();
+      if (typeof search !== 'undefined' && search) params.append('search', search);
+      if (typeof pathTab !== 'undefined' && pathTab) params.append('tab', pathTab);
+      await apiDownload(`/products/export/excel?${params.toString()}`, `SWAG_Products_${new Date().toISOString().split('T')[0]}.xlsx`);
+    } catch (err) {
+      alert(err.message || 'Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -156,7 +171,7 @@ export default function Products() {
           </div>
           <div className="products-actions">
             <button className="btn-outline"><MdFilterList size={16} /> Filter</button>
-            <button className="btn-outline"><MdFileDownload size={16} /> Export</button>
+            <button className="btn-outline" onClick={handleExport} disabled={isExporting}><MdFileDownload size={16} /> {isExporting ? "Exporting..." : "Export"}</button>
             <button className="btn-primary" onClick={() => navigate("/products/add")}>
               <MdAdd size={16} /> New Product
             </button>

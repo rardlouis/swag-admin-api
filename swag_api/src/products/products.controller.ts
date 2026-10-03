@@ -18,6 +18,8 @@ import { ProductsService } from './products.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { UpdateProductDto } from './dto/update-product.dto';
 import { AdminGuard } from '../common/session-auth';
+import { Res, StreamableFile } from '@nestjs/common';
+import type { Response } from 'express';
 
 type UploadedProductFile = {
   filename: string;
@@ -97,4 +99,21 @@ export class ProductsController {
   remove(@Param('id') id: string) {
     return this.productsService.remove(id);
   }
+
+  @Get('export/excel')
+  @UseGuards(AdminGuard)
+  async exportExcel(
+    @Query('search') search: string,
+    @Query('tab') tab: string,
+    @Res({ passthrough: true }) res: Response
+  ) {
+    const buffer = await this.productsService.exportProducts(search, tab);
+    const date = new Date().toISOString().split('T')[0];
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename="SWAG_Products_${date}.xlsx"`
+    });
+    return new StreamableFile(buffer as Uint8Array);
+  }
+
 }
