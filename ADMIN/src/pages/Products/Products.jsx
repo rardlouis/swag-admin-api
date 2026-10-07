@@ -1,4 +1,4 @@
-import { apiDownload } from "../../api.js";
+import { apiDownload, imageUrl } from "../../api.js";
 import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { apiDelete, apiGet, apiPatch, formatDate, formatPeso } from "../../api.js";
@@ -225,7 +225,7 @@ export default function Products() {
                 <td>
                   <div className="product-cell">
                     <div className="product-thumb">
-                      {product.imageUrl ? <img src={product.imageUrl} alt="" /> : "SW"}
+                      {product.imageUrl ? <img src={imageUrl(product.imageUrl)} alt="" /> : "SW"}
                     </div>
                     <div>
                       <p className="product-id">{product.id}</p>
@@ -243,7 +243,7 @@ export default function Products() {
                 <td>{formatPeso(product.price)}</td>
                 <td>{product.size || "-"}</td>
                 <td>{product.qty}</td>
-                <td className="date-cell">{formatDate(product.createdAt, { hour: "numeric", minute: "2-digit" })}</td>
+                <td className="date-cell">{formatDate(product.createdAt, { hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" })}</td>
                 <td>
                   <span className={`status-badge ${status === "Available" ? "status-available" : "status-out"}`}>
                     {status}

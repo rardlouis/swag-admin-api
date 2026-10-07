@@ -25,6 +25,7 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
     await this.ensureBaseLookups();
     await this.ensureUserProfileColumns();
     await this.ensureProductSoftDeleteColumn();
+    await this.ensureProductCreatedAtPhilippineTime();
     await this.ensureMessageReadAtColumn();
     await this.ensureConversationViewColumns();
     await this.ensureVoucherSchema();
@@ -179,6 +180,47 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
         ADD is_deleted BIT NOT NULL CONSTRAINT DF_PRODUCTS_IS_DELETED DEFAULT ((0))
       `);
     }
+  }
+
+  private async ensureProductCreatedAtPhilippineTime() {
+    if (!(await this.tableExists('PRODUCTS'))) {
+      return;
+    }
+
+    await this.query(`
+      DECLARE @defaultConstraint sysname;
+      DECLARE @dropDefaultConstraintSql nvarchar(max);
+
+      SELECT @defaultConstraint = dc.name
+      FROM sys.default_constraints dc
+      INNER JOIN sys.columns c
+        ON c.default_object_id = dc.object_id
+      WHERE dc.parent_object_id = OBJECT_ID('dbo.PRODUCTS')
+        AND c.name = 'created_at';
+
+      IF NOT EXISTS (
+        SELECT 1
+        FROM sys.default_constraints dc
+        INNER JOIN sys.columns c
+          ON c.default_object_id = dc.object_id
+        WHERE dc.parent_object_id = OBJECT_ID('dbo.PRODUCTS')
+          AND c.name = 'created_at'
+          AND dc.definition LIKE '%SYSUTCDATETIME%'
+          AND dc.definition LIKE '%Singapore Standard Time%'
+      )
+      BEGIN
+        IF @defaultConstraint IS NOT NULL
+        BEGIN
+          SET @dropDefaultConstraintSql = N'ALTER TABLE dbo.PRODUCTS DROP CONSTRAINT ' + QUOTENAME(@defaultConstraint);
+          EXEC sp_executesql @dropDefaultConstraintSql;
+        END
+
+        ALTER TABLE dbo.PRODUCTS
+        ADD DEFAULT (
+          CONVERT(datetime2(7), SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'Singapore Standard Time')
+        ) FOR created_at;
+      END
+    `);
   }
 
   private async ensureMessageReadAtColumn() {

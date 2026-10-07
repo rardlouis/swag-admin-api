@@ -7,7 +7,7 @@ import {
   MdOutlineImage,
   MdSave,
 } from "react-icons/md";
-import { apiGet, apiPost, apiUpload } from "../../api.js";
+import { apiGet, apiPost, apiUpload, imageUrl } from "../../api.js";
 import { containsProfanity, PROFANITY_ERROR } from "../../profanity.js";
 import "./ProductsForm.css";
 
@@ -46,6 +46,8 @@ export default function ProductsAdd() {
   });
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [uploadingImageCount, setUploadingImageCount] = useState(0);
+  const isUploadingImages = uploadingImageCount > 0;
 
   useEffect(() => {
     apiGet("/products/meta/lookups")
@@ -124,27 +126,53 @@ export default function ProductsAdd() {
     if (!selectedFiles.length) return;
 
     setError("");
+    const selectedImages = selectedFiles.map((file) => ({
+      imageUrl: "",
+      previewUrl: URL.createObjectURL(file),
+    }));
+    const previewUrls = selectedImages.map((image) => image.previewUrl);
+
+    setForm((prev) => ({
+      ...prev,
+      images: [...prev.images, ...selectedImages].slice(0, 4),
+    }));
+    setUploadingImageCount((count) => count + 1);
 
     try {
       const uploaded = await apiUpload("/products/uploads", selectedFiles);
       setForm((prev) => ({
         ...prev,
-        images: [
-          ...prev.images,
-          ...uploaded.map((image) => ({
-            imageUrl: image.imageUrl,
-          })),
-        ].slice(0, 4),
+        images: prev.images.map((image) => {
+          const uploadIndex = previewUrls.indexOf(image.previewUrl);
+
+          return uploadIndex === -1
+            ? image
+            : { imageUrl: uploaded[uploadIndex]?.imageUrl ?? image.imageUrl };
+        }),
       }));
+      previewUrls.forEach((previewUrl) => URL.revokeObjectURL(previewUrl));
     } catch (err) {
+      setForm((prev) => ({
+        ...prev,
+        images: prev.images.filter((image) => !previewUrls.includes(image.previewUrl)),
+      }));
+      previewUrls.forEach((previewUrl) => URL.revokeObjectURL(previewUrl));
       setError(err.message);
+    } finally {
+      setUploadingImageCount((count) => Math.max(0, count - 1));
     }
   };
 
   const removeImage = (index) => {
     setForm((prev) => ({
       ...prev,
-      images: prev.images.filter((_, imageIndex) => imageIndex !== index),
+      images: prev.images.filter((image, imageIndex) => {
+        if (imageIndex === index && image.previewUrl) {
+          URL.revokeObjectURL(image.previewUrl);
+        }
+
+        return imageIndex !== index;
+      }),
     }));
   };
 
@@ -453,7 +481,7 @@ export default function ProductsAdd() {
                     />
                     {image ? (
                       <>
-                        <img src={image.imageUrl} alt={`Product ${index + 1}`} />
+                        <img src={image.previewUrl ?? imageUrl(image.imageUrl)} alt={`Product ${index + 1}`} />
                         <button
                           className="photo-remove-btn"
                           onClick={(event) => {
@@ -477,9 +505,9 @@ export default function ProductsAdd() {
             </div>
           </section>
 
-          <button className="product-save-btn" disabled={isSaving} type="submit">
+          <button className="product-save-btn" disabled={isSaving || isUploadingImages} type="submit">
             <MdSave size={17} />
-            {isSaving ? "Saving..." : "Save Product"}
+            {isSaving ? "Saving..." : isUploadingImages ? "Uploading images..." : "Save Product"}
           </button>
         </aside>
       </form>

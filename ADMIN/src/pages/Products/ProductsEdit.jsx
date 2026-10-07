@@ -8,7 +8,7 @@ import {
   MdSave,
   MdUndo,
 } from "react-icons/md";
-import { apiGet, apiPatch, apiUpload } from "../../api.js";
+import { apiGet, apiPatch, apiUpload, imageUrl } from "../../api.js";
 import { containsProfanity, PROFANITY_ERROR } from "../../profanity.js";
 import "./ProductsForm.css";
 
@@ -78,6 +78,8 @@ export default function ProductsEdit() {
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [uploadingImageCount, setUploadingImageCount] = useState(0);
+  const isUploadingImages = uploadingImageCount > 0;
 
   useEffect(() => {
     Promise.all([apiGet(`/products/${id}`), apiGet("/products/meta/lookups")])
@@ -175,27 +177,53 @@ export default function ProductsEdit() {
     if (!selectedFiles.length) return;
 
     setError("");
+    const selectedImages = selectedFiles.map((file) => ({
+      imageUrl: "",
+      previewUrl: URL.createObjectURL(file),
+    }));
+    const previewUrls = selectedImages.map((image) => image.previewUrl);
+
+    setForm((prev) => ({
+      ...prev,
+      images: [...prev.images, ...selectedImages].slice(0, 4),
+    }));
+    setUploadingImageCount((count) => count + 1);
 
     try {
       const uploaded = await apiUpload("/products/uploads", selectedFiles);
       setForm((prev) => ({
         ...prev,
-        images: [
-          ...prev.images,
-          ...uploaded.map((image) => ({
-            imageUrl: image.imageUrl,
-          })),
-        ].slice(0, 4),
+        images: prev.images.map((image) => {
+          const uploadIndex = previewUrls.indexOf(image.previewUrl);
+
+          return uploadIndex === -1
+            ? image
+            : { imageUrl: uploaded[uploadIndex]?.imageUrl ?? image.imageUrl };
+        }),
       }));
+      previewUrls.forEach((previewUrl) => URL.revokeObjectURL(previewUrl));
     } catch (err) {
+      setForm((prev) => ({
+        ...prev,
+        images: prev.images.filter((image) => !previewUrls.includes(image.previewUrl)),
+      }));
+      previewUrls.forEach((previewUrl) => URL.revokeObjectURL(previewUrl));
       setError(err.message);
+    } finally {
+      setUploadingImageCount((count) => Math.max(0, count - 1));
     }
   };
 
   const removeImage = (index) => {
     setForm((prev) => ({
       ...prev,
-      images: prev.images.filter((_, imageIndex) => imageIndex !== index),
+      images: prev.images.filter((image, imageIndex) => {
+        if (imageIndex === index && image.previewUrl) {
+          URL.revokeObjectURL(image.previewUrl);
+        }
+
+        return imageIndex !== index;
+      }),
     }));
   };
 
@@ -494,9 +522,9 @@ export default function ProductsEdit() {
             </div>
 
             <div className="product-photo-grid">
-              {form.images[0]?.imageUrl ? (
+              {form.images[0]?.previewUrl || form.images[0]?.imageUrl ? (
                 <div className="product-large-preview">
-                  <img src={form.images[0].imageUrl} alt="Primary product preview" />
+                  <img src={form.images[0].previewUrl ?? imageUrl(form.images[0].imageUrl)} alt="Primary product preview" />
                 </div>
               ) : null}
               {Array.from({ length: 4 }).map((_, index) => {
@@ -512,7 +540,7 @@ export default function ProductsEdit() {
                     />
                     {image ? (
                       <>
-                        <img src={image.imageUrl} alt={`Product ${index + 1}`} />
+                        <img src={image.previewUrl ?? imageUrl(image.imageUrl)} alt={`Product ${index + 1}`} />
                         <button
                           className="photo-remove-btn"
                           onClick={(event) => {
@@ -542,9 +570,9 @@ export default function ProductsEdit() {
               Discard Changes
             </button>
 
-            <button className="product-save-btn" disabled={isSaving} type="submit">
+            <button className="product-save-btn" disabled={isSaving || isUploadingImages} type="submit">
               <MdSave size={17} />
-              {isSaving ? "Saving..." : "Save Changes"}
+              {isSaving ? "Saving..." : isUploadingImages ? "Uploading images..." : "Save Changes"}
             </button>
           </div>
         </aside>

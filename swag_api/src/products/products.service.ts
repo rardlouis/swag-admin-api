@@ -288,7 +288,7 @@ export class ProductsService {
         ${deletedSelect}
         p.avg_rating AS avgRating,
         p.is_active AS isActive,
-        p.created_at AS createdAt,
+        CONVERT(varchar(33), p.created_at, 126) + '+08:00' AS createdAt,
         c.name AS category,
         c.slug AS categorySlug,
         c.category_id AS categoryId,
@@ -351,7 +351,7 @@ export class ProductsService {
           ${deletedSelect}
           p.avg_rating AS avgRating,
           p.is_active AS isActive,
-          p.created_at AS createdAt,
+          CONVERT(varchar(33), p.created_at, 126) + '+08:00' AS createdAt,
           c.name AS category,
           c.slug AS categorySlug,
           c.category_id AS categoryId,
