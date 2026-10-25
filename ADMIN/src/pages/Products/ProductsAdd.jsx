@@ -19,6 +19,7 @@ const initialForm = {
   customStyle: "",
   categoryId: "",
   genderId: "",
+  audienceIds: [],
   sizeId: "",
   garmentTypeId: "",
   measurements: [],
@@ -43,6 +44,7 @@ export default function ProductsAdd() {
     genders: [],
     colors: [],
     fashionStyles: [],
+    styleAudiences: [],
   });
   const [error, setError] = useState("");
   const [isSaving, setIsSaving] = useState(false);
@@ -72,6 +74,7 @@ export default function ProductsAdd() {
     if (!form.categoryId) {
       return "Product category is required.";
     }
+    if (!form.audienceIds.length) return "Select at least one product audience.";
     if (!Number.isFinite(price) || price <= 0) {
       return "Price must be greater than zero.";
     }
@@ -184,6 +187,7 @@ export default function ProductsAdd() {
     customStyle: form.customStyle || null,
     categoryId: Number(form.categoryId),
     genderId: form.genderId ? Number(form.genderId) : null,
+    audienceIds: form.audienceIds.map(Number),
     sizeId: form.sizeId ? Number(form.sizeId) : null,
     garmentTypeId: form.garmentTypeId ? Number(form.garmentTypeId) : null,
     measurements: form.measurements,
@@ -289,6 +293,17 @@ export default function ProductsAdd() {
               <MdKeyboardArrowDown size={20} />
             </label>
           </div>
+
+          <fieldset className="product-audience-field">
+            <legend>Product Audiences</legend>
+            <p>Choose every audience this item is suitable for.</p>
+            <div className="product-audience-options">
+              {(lookups.styleAudiences ?? []).map((audience) => {
+                const selected = form.audienceIds.includes(Number(audience.id));
+                return <label key={audience.id} className={selected ? "selected" : ""}><input type="checkbox" checked={selected} onChange={() => updateField("audienceIds", selected ? form.audienceIds.filter((id) => id !== Number(audience.id)) : [...form.audienceIds, Number(audience.id)])} />{audience.label}</label>;
+              })}
+            </div>
+          </fieldset>
 
           <div className="product-add-row">
             <label className="product-add-field">

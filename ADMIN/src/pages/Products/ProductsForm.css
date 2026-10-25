@@ -102,6 +102,20 @@
   margin-bottom: 16px;
 }
 
+.product-audience-field {
+  border: 1px solid #d8e4f1;
+  border-radius: 10px;
+  margin: 0 0 16px;
+  padding: 12px 14px 14px;
+}
+
+.product-audience-field legend { color: #222; font-size: 12px; font-weight: 700; padding: 0 4px; }
+.product-audience-field p { color: #667085; font-size: 12px; margin: 0 0 10px; }
+.product-audience-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.product-audience-options label { align-items: center; background: #f8fafc; border: 1px solid #d8d8d8; border-radius: 999px; color: #334155; cursor: pointer; display: inline-flex; font-size: 13px; font-weight: 600; gap: 7px; min-height: 38px; padding: 0 13px; }
+.product-audience-options label.selected { background: #eaf2ff; border-color: #2563eb; color: #1553a8; }
+.product-audience-options input { accent-color: #2563eb; margin: 0; }
+
 .product-add-field span {
   font-size: 12px;
   font-weight: 700;

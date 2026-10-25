@@ -23,6 +23,11 @@ export class AdminController {
     return this.adminService.dashboard();
   }
 
+  @Get('popular-styles')
+  popularStyles(@Query('period') period?: string) {
+    return this.adminService.popularStyles(period);
+  }
+
   @Get('sales-report')
   salesReport() {
     return this.adminService.salesReport();

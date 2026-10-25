@@ -24,6 +24,7 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
   async onModuleInit() {
     await this.ensureBaseLookups();
     await this.ensureUserProfileColumns();
+    await this.ensureStyleAudienceSchema();
     await this.ensureProductSoftDeleteColumn();
     await this.ensureProductCreatedAtPhilippineTime();
     await this.ensureMessageReadAtColumn();
@@ -167,6 +168,90 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
         ADD skin_hex NVARCHAR(7) NULL
       `);
     }
+
+    // Both columns are deliberately nullable. Existing accounts retain their
+    // current data, while new registrations can supply validated values.
+    if (!(await this.columnExists('USERS', 'gender_id'))) {
+      await this.query(`
+        ALTER TABLE USERS
+        ADD gender_id TINYINT NULL
+      `);
+    }
+
+    if (!(await this.columnExists('USERS', 'fashion_style'))) {
+      await this.query(`
+        ALTER TABLE USERS
+        ADD fashion_style NVARCHAR(500) NULL
+      `);
+    }
+
+    if (!(await this.columnExists('USERS', 'cover_photo_url'))) {
+      await this.query(`
+        ALTER TABLE USERS
+        ADD cover_photo_url NVARCHAR(500) NULL
+      `);
+    }
+
+    // The app exposes these values as the account-profile selector. MERGE
+    // preserves existing rows and makes the choices safe for older databases.
+    if (await this.tableExists('GENDERS')) {
+      await this.query(`
+        MERGE dbo.GENDERS AS target
+        USING (VALUES (N'Male'), (N'Female'), (N'Non-binary'), (N'Prefer not to say')) AS source(label)
+        ON LOWER(target.label) = LOWER(source.label)
+        WHEN NOT MATCHED THEN INSERT (label) VALUES (source.label);
+      `);
+    }
+  }
+
+  /**
+   * Audiences are product-discovery preferences, separate from a user's
+   * personal gender. Junction tables intentionally support multi-select.
+   */
+  async ensureStyleAudienceSchema() {
+    if (!(await this.tableExists('USERS')) || !(await this.tableExists('PRODUCTS'))) return;
+
+    await this.query(`
+      IF OBJECT_ID('dbo.STYLE_AUDIENCES', 'U') IS NULL
+      BEGIN
+        CREATE TABLE dbo.STYLE_AUDIENCES (
+          audience_id TINYINT NOT NULL CONSTRAINT PK_STYLE_AUDIENCES PRIMARY KEY,
+          label NVARCHAR(20) NOT NULL CONSTRAINT UQ_STYLE_AUDIENCES_LABEL UNIQUE
+        );
+      END;
+
+      MERGE dbo.STYLE_AUDIENCES AS target
+      USING (VALUES (1, N'Masculine'), (2, N'Feminine'), (3, N'Unisex')) AS source(audience_id, label)
+      ON target.audience_id = source.audience_id
+      WHEN NOT MATCHED THEN INSERT (audience_id, label) VALUES (source.audience_id, source.label);
+
+      IF OBJECT_ID('dbo.USER_STYLE_AUDIENCES', 'U') IS NULL
+      BEGIN
+        CREATE TABLE dbo.USER_STYLE_AUDIENCES (
+          user_id UNIQUEIDENTIFIER NOT NULL,
+          audience_id TINYINT NOT NULL,
+          CONSTRAINT PK_USER_STYLE_AUDIENCES PRIMARY KEY (user_id, audience_id),
+          CONSTRAINT FK_USER_STYLE_AUDIENCES_USER FOREIGN KEY (user_id) REFERENCES dbo.USERS(user_id),
+          CONSTRAINT FK_USER_STYLE_AUDIENCES_AUDIENCE FOREIGN KEY (audience_id) REFERENCES dbo.STYLE_AUDIENCES(audience_id)
+        );
+      END;
+
+      IF OBJECT_ID('dbo.PRODUCT_STYLE_AUDIENCES', 'U') IS NULL
+      BEGIN
+        CREATE TABLE dbo.PRODUCT_STYLE_AUDIENCES (
+          product_id UNIQUEIDENTIFIER NOT NULL,
+          audience_id TINYINT NOT NULL,
+          CONSTRAINT PK_PRODUCT_STYLE_AUDIENCES PRIMARY KEY (product_id, audience_id),
+          CONSTRAINT FK_PRODUCT_STYLE_AUDIENCES_PRODUCT FOREIGN KEY (product_id) REFERENCES dbo.PRODUCTS(product_id),
+          CONSTRAINT FK_PRODUCT_STYLE_AUDIENCES_AUDIENCE FOREIGN KEY (audience_id) REFERENCES dbo.STYLE_AUDIENCES(audience_id)
+        );
+      END;
+
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_USER_STYLE_AUDIENCES_USER' AND object_id = OBJECT_ID('dbo.USER_STYLE_AUDIENCES'))
+        CREATE INDEX IX_USER_STYLE_AUDIENCES_USER ON dbo.USER_STYLE_AUDIENCES(user_id);
+      IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_PRODUCT_STYLE_AUDIENCES_AUDIENCE_PRODUCT' AND object_id = OBJECT_ID('dbo.PRODUCT_STYLE_AUDIENCES'))
+        CREATE INDEX IX_PRODUCT_STYLE_AUDIENCES_AUDIENCE_PRODUCT ON dbo.PRODUCT_STYLE_AUDIENCES(audience_id, product_id);
+    `);
   }
 
   private async ensureProductSoftDeleteColumn() {

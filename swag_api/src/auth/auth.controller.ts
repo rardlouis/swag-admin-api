@@ -1,4 +1,7 @@
-import { Body, Controller, Delete, ForbiddenException, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, Param, Patch, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { extname } from 'path';
 import { AuthService } from './auth.service';
 import { SessionAuthGuard, requireOwnership, type SessionIdentity } from '../common/session-auth';
 
@@ -70,6 +73,53 @@ export class AuthController {
   updateAppProfile(@Param('id') id: string, @Body() body: unknown, @Req() request: { user?: SessionIdentity }) {
     requireOwnership(request.user, id);
     return this.authService.updateAppProfile(id, body);
+  }
+
+  @Post('app/profile/:id/photo')
+  @UseGuards(SessionAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      storage: diskStorage({
+        destination: './uploads/profiles',
+        filename: (_request, file, callback) => {
+          const base = file.originalname.replace(extname(file.originalname), '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'profile';
+          callback(null, `${Date.now()}-${base}${extname(file.originalname).toLowerCase()}`);
+        },
+      }),
+      fileFilter: (_request, file, callback) => callback(null, /^image\/(png|jpe?g|webp)$/i.test(file.mimetype)),
+      limits: { fileSize: 4 * 1024 * 1024 },
+    }),
+  )
+  updateAppProfilePhoto(@Param('id') id: string, @UploadedFile() file: { filename: string } | undefined, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, id);
+    return this.authService.updateAppProfilePhoto(id, file);
+  }
+
+  @Post('app/profile/:id/cover')
+  @UseGuards(SessionAuthGuard)
+  @UseInterceptors(
+    FileInterceptor('photo', {
+      storage: diskStorage({
+        destination: './uploads/profiles',
+        filename: (_request, file, callback) => {
+          const base = file.originalname.replace(extname(file.originalname), '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'cover';
+          callback(null, `${Date.now()}-${base}${extname(file.originalname).toLowerCase()}`);
+        },
+      }),
+      fileFilter: (_request, file, callback) => callback(null, /^image\/(png|jpe?g|webp)$/i.test(file.mimetype)),
+      limits: { fileSize: 4 * 1024 * 1024 },
+    }),
+  )
+  updateAppProfileCover(@Param('id') id: string, @UploadedFile() file: { filename: string } | undefined, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, id);
+    return this.authService.updateAppProfileCover(id, file);
+  }
+
+  @Delete('app/profile/:id/cover')
+  @UseGuards(SessionAuthGuard)
+  removeAppProfileCover(@Param('id') id: string, @Req() request: { user?: SessionIdentity }) {
+    requireOwnership(request.user, id);
+    return this.authService.removeAppProfileCover(id);
   }
 
   @Patch('app/account/:id')

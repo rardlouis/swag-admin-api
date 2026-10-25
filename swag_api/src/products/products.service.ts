@@ -31,7 +31,11 @@ export class ProductsService {
 
   async create(createProductDto: CreateProductDto) {
     await this.ensureProductStyleColumn();
-    this.validateProduct(createProductDto);
+    await this.databaseService.ensureStyleAudienceSchema();
+    if (!createProductDto.audienceIds?.length) {
+      throw new BadRequestException('Select at least one product audience.');
+    }
+    await this.validateProduct(createProductDto);
     await this.validateCategoryGarmentType(createProductDto);
 
     const quantity = Number(createProductDto.quantity ?? 0);
@@ -95,6 +99,7 @@ export class ProductsService {
     }
 
     await this.saveProductImages(id, this.getImageUrls(createProductDto));
+    await this.saveProductAudiences(id, createProductDto.audienceIds ?? []);
 
     await this.saveProductMeasurements(id, createProductDto);
 
@@ -137,6 +142,7 @@ export class ProductsService {
 
   async lookups() {
     await this.ensureProductStyleColumn();
+    await this.databaseService.ensureStyleAudienceSchema();
     await this.ensureColorLookups();
 
     const [hasGarmentTypes, hasPalettes, hasSizeRanges, hasPresetColors, hasColorFamilies] = await Promise.all([
@@ -187,7 +193,7 @@ export class ProductsService {
         ORDER BY sort_order ASC
       `;
 
-    const [categories, sizes, dbGarmentTypes, genders, palettes, colors, colorFamilies, fashionStyles] = await Promise.all([
+    const [categories, sizes, dbGarmentTypes, genders, palettes, colors, colorFamilies, fashionStyles, styleAudiences] = await Promise.all([
       this.databaseService.query(`
         SELECT
           category_id AS id,
@@ -231,6 +237,7 @@ export class ProductsService {
         ORDER BY label ASC
       `) : Promise.resolve([]),
       this.databaseService.query(`SELECT style_id AS id, label FROM FASHION_STYLES ORDER BY label ASC`),
+      this.databaseService.query(`SELECT audience_id AS id, label FROM STYLE_AUDIENCES ORDER BY audience_id ASC`),
     ]);
 
     const garmentTypes = hasGarmentTypes
@@ -240,7 +247,7 @@ export class ProductsService {
           label: category.name,
         }));
 
-    return { categories, sizes, garmentTypes, genders, palettes, colors, colorFamilies, fashionStyles };
+    return { categories, sizes, garmentTypes, genders, palettes, colors, colorFamilies, fashionStyles, styleAudiences };
   }
 
   async measurementDefaults(sizeId: number, garmentTypeId: number) {
@@ -269,6 +276,7 @@ export class ProductsService {
 
   async findAll() {
     await this.ensureProductStyleColumn();
+    await this.databaseService.ensureStyleAudienceSchema();
     const color = await this.productColorSelect();
     const hasDeletedColumn = await this.databaseService.columnExists('PRODUCTS', 'is_deleted');
     const deletedSelect = hasDeletedColumn ? 'p.is_deleted AS isDeleted,' : 'CAST(0 AS bit) AS isDeleted,';
@@ -294,6 +302,8 @@ export class ProductsService {
         c.category_id AS categoryId,
         g.gender_id AS genderId,
         g.label AS gender,
+        audiences.ids AS audienceIds,
+        audiences.labels AS audienceTags,
         img.image_url AS imageUrl,
         images.imageCount,
         sizes.sizes AS size
@@ -301,6 +311,14 @@ export class ProductsService {
       INNER JOIN CATEGORIES c ON c.category_id = p.category_id
       LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
       LEFT JOIN FASHION_STYLES fs ON fs.style_id = p.style_id
+      OUTER APPLY (
+        SELECT
+          STRING_AGG(CONVERT(varchar(3), psa.audience_id), ',') WITHIN GROUP (ORDER BY psa.audience_id) AS ids,
+          STRING_AGG(sa.label, ', ') WITHIN GROUP (ORDER BY psa.audience_id) AS labels
+        FROM PRODUCT_STYLE_AUDIENCES psa
+        INNER JOIN STYLE_AUDIENCES sa ON sa.audience_id = psa.audience_id
+        WHERE psa.product_id = p.product_id
+      ) audiences
       ${color.join}
       OUTER APPLY (
         SELECT TOP 1 image_url
@@ -332,6 +350,7 @@ export class ProductsService {
 
   async findOne(id: string) {
     await this.ensureProductStyleColumn();
+    await this.databaseService.ensureStyleAudienceSchema();
     const color = await this.productColorSelect();
     const hasDeletedColumn = await this.databaseService.columnExists('PRODUCTS', 'is_deleted');
     const deletedSelect = hasDeletedColumn ? 'p.is_deleted AS isDeleted,' : 'CAST(0 AS bit) AS isDeleted,';
@@ -357,6 +376,8 @@ export class ProductsService {
           c.category_id AS categoryId,
           g.gender_id AS genderId,
           g.label AS gender,
+          audiences.ids AS audienceIds,
+          audiences.labels AS audienceTags,
           stock.size_id AS sizeId,
           stock.label AS size,
           stock.stock_qty AS sizeQty,
@@ -366,6 +387,14 @@ export class ProductsService {
         INNER JOIN CATEGORIES c ON c.category_id = p.category_id
         LEFT JOIN GENDERS g ON g.gender_id = p.gender_id
         LEFT JOIN FASHION_STYLES fs ON fs.style_id = p.style_id
+        OUTER APPLY (
+          SELECT
+            STRING_AGG(CONVERT(varchar(3), psa.audience_id), ',') WITHIN GROUP (ORDER BY psa.audience_id) AS ids,
+            STRING_AGG(sa.label, ', ') WITHIN GROUP (ORDER BY psa.audience_id) AS labels
+          FROM PRODUCT_STYLE_AUDIENCES psa
+          INNER JOIN STYLE_AUDIENCES sa ON sa.audience_id = psa.audience_id
+          WHERE psa.product_id = p.product_id
+        ) audiences
         ${color.join}
         OUTER APPLY (
           SELECT TOP 1 pss.size_id, ss.label, pss.stock_qty
@@ -462,7 +491,8 @@ export class ProductsService {
 
   async update(id: string, updateProductDto: UpdateProductDto) {
     await this.ensureProductStyleColumn();
-    this.validateProduct(updateProductDto);
+    await this.databaseService.ensureStyleAudienceSchema();
+    await this.validateProduct(updateProductDto);
     await this.validateCategoryGarmentType(updateProductDto);
     const quantity = Number(updateProductDto.quantity ?? 0);
     const styleId = await this.resolveProductStyle(updateProductDto.styleId, updateProductDto.customStyle);
@@ -531,6 +561,7 @@ export class ProductsService {
     }
 
     await this.saveProductImages(id, this.getImageUrls(updateProductDto));
+    if (updateProductDto.audienceIds !== undefined) await this.saveProductAudiences(id, updateProductDto.audienceIds);
 
     await this.saveProductMeasurements(id, updateProductDto);
 
@@ -571,7 +602,7 @@ export class ProductsService {
     return styleId ? Number(styleId) : null;
   }
 
-  private validateProduct(productDto: CreateProductDto | UpdateProductDto) {
+  private async validateProduct(productDto: CreateProductDto | UpdateProductDto) {
     if (!productDto.name?.trim()) {
       throw new BadRequestException('Product name is required');
     }
@@ -603,6 +634,26 @@ export class ProductsService {
 
     this.toNullableShippingValue(productDto.weightKg);
     this.toNullableShippingValue(productDto.bulkUnits);
+    if (productDto.audienceIds !== undefined) await this.validateAudienceIds(productDto.audienceIds);
+  }
+
+  private async saveProductAudiences(productId: string, audienceIds: number[]) {
+    const values = await this.validateAudienceIds(audienceIds);
+    if (!values.length) return;
+    await this.databaseService.request((request) => request.input('productId', sql.UniqueIdentifier, productId).query(`DELETE FROM PRODUCT_STYLE_AUDIENCES WHERE product_id = @productId`));
+    for (const audienceId of values) {
+      await this.databaseService.request((request) => request.input('productId', sql.UniqueIdentifier, productId).input('audienceId', sql.TinyInt, audienceId).query(`INSERT INTO PRODUCT_STYLE_AUDIENCES (product_id, audience_id) VALUES (@productId, @audienceId)`));
+    }
+  }
+
+  private async validateAudienceIds(value: unknown) {
+    const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [value];
+    const values = [...new Set(raw.map((item) => Number(typeof item === 'object' && item !== null ? (item as { id?: unknown }).id : item)).filter((id) => Number.isInteger(id) && id > 0 && id <= 255))];
+    if (!values.length) throw new BadRequestException('Select one or more valid product audiences.');
+    // PRODUCT_STYLE_AUDIENCES has a foreign key to STYLE_AUDIENCES. The
+    // database therefore remains the final authority, while this accepts the
+    // number/string payload variants produced by existing admin deployments.
+    return values;
   }
 
   private toNullableShippingValue(value?: number | string | null) {

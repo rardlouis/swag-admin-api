@@ -28,6 +28,8 @@ type AppRegisterBody = {
   address_region?: string | null;
   address_zip?: string | null;
   fashion_style?: string;
+  gender?: string;
+  audienceIds?: number[];
   preferred_size?: string;
   skin_hex?: string | null;
   body_chest_cm?: number | string | null;
@@ -37,6 +39,8 @@ type AppRegisterBody = {
   email_verification_id?: string;
   phone_verification_id?: string;
 };
+
+type UploadedProfileFile = { filename: string };
 
 type EmailOtpPurpose = 'registration' | 'password_reset' | 'admin_password_reset' | 'password_change';
 
@@ -127,8 +131,14 @@ export class AuthService {
     if (!process.env.BREVO_API_KEY || !process.env.BREVO_SENDER_EMAIL) throw new BadRequestException('Email verification is not configured.');
     try {
       const response = await fetch('https://api.brevo.com/v3/smtp/email', { method: 'POST', signal: AbortSignal.timeout(10_000), headers: { 'api-key': process.env.BREVO_API_KEY, 'content-type': 'application/json' }, body: JSON.stringify({ sender: { email: process.env.BREVO_SENDER_EMAIL, name: process.env.BREVO_SENDER_NAME || "A'FRO" }, to: [{ email }], subject, htmlContent: `<p>Your A'FRO code is:</p><h2>${code}</h2><p>This code expires in 5 minutes. Do not share it with anyone.</p>` }) });
-      if (!response.ok) throw new Error('Brevo request failed');
-    } catch {
+      if (!response.ok) {
+        const detail = (await response.text()).slice(0, 1_000);
+        throw new Error(`Brevo rejected the OTP email (${response.status}): ${detail}`);
+      }
+    } catch (error) {
+      // Retain the safe client message, but record the provider failure for
+      // operators. This avoids leaking provider/account details to clients.
+      this.logger.error('Brevo email OTP delivery failed', error instanceof Error ? error.stack : String(error));
       await this.databaseService.request((request) => request.input('id', sql.UniqueIdentifier, verificationId).query('UPDATE EMAIL_OTPS SET invalidated_at = GETDATE() WHERE verification_id = @id'));
       throw new BadRequestException('We could not send a verification email right now. Please try again.');
     }
@@ -441,6 +451,9 @@ export class AuthService {
           a.postal_code AS address_zip,
           u.id_number,
           u.profile_photo_url,
+          u.cover_photo_url,
+          audiences.ids AS audienceIds,
+          audiences.labels AS audienceLabels,
           u.skin_tone_detected,
           u.skin_hex,
           CAST(u.body_chest_cm AS float) AS body_chest_cm,
@@ -449,11 +462,21 @@ export class AuthService {
           CAST(u.body_height_cm AS float) AS body_height_cm,
           u.is_admin,
           u.is_active,
-          fs.label AS fashion_style,
+          COALESCE(NULLIF(u.fashion_style, ''), fs.label) AS fashion_style,
+          g.label AS gender,
           ps.label AS preferred_size
         FROM USERS u
         LEFT JOIN FASHION_STYLES fs ON fs.style_id = u.style_id
+        LEFT JOIN GENDERS g ON g.gender_id = u.gender_id
         LEFT JOIN SIZE_STANDARDS ps ON ps.size_id = u.preferred_size_id
+        OUTER APPLY (
+          SELECT
+            STRING_AGG(CONVERT(varchar(3), usa.audience_id), ',') WITHIN GROUP (ORDER BY usa.audience_id) AS ids,
+            STRING_AGG(sa.label, ', ') WITHIN GROUP (ORDER BY usa.audience_id) AS labels
+          FROM USER_STYLE_AUDIENCES usa
+          INNER JOIN STYLE_AUDIENCES sa ON sa.audience_id = usa.audience_id
+          WHERE usa.user_id = u.user_id
+        ) audiences
         OUTER APPLY (
           SELECT TOP 1
             street,
@@ -477,7 +500,7 @@ export class AuthService {
       `),
     );
 
-    const user = users[0];
+    const user = users[0] as (Record<string, unknown> & { audienceIds?: string | null }) | undefined;
 
     if (!user || !(await passwordMatches(password, String(user.passwordHash ?? '')))) {
       throw new UnauthorizedException('Invalid email or password');
@@ -492,10 +515,11 @@ export class AuthService {
     }
 
     delete (user as { passwordHash?: string }).passwordHash;
+    (user as Record<string, unknown>).audienceIds = user.audienceIds ? String(user.audienceIds).split(',').map(Number).filter(Number.isFinite) : [];
 
     return {
       user,
-      token: createSessionToken(user.user_id, false),
+      token: createSessionToken(String(user.user_id), false),
     };
   }
 
@@ -702,7 +726,10 @@ export class AuthService {
       .filter(Boolean)
       .join(', ') || null;
     const streetLine = [addressHouseNo, addressStreet].filter(Boolean).join(', ') || shippingAddress;
-    const styleLabel = payload.fashion_style?.split(',')[0]?.trim() || null;
+    const fashionStyles = await this.validatedFashionStyles(payload.fashion_style);
+    const audienceIds = await this.validatedStyleAudienceIds(payload.audienceIds, true);
+    const styleLabel = fashionStyles[0] ?? null;
+    const genderId = await this.findGenderId(payload.gender);
     const preferredSizeLabel = payload.preferred_size?.trim() || null;
     const idTypeLabel = this.normalizeIdType(payload.id_type);
     const skinHex = this.normalizeSkinHex(payload.skin_hex);
@@ -713,6 +740,9 @@ export class AuthService {
 
     if (!email || !password || !fullName) {
       throw new BadRequestException('Email, password, and full name are required');
+    }
+    if (genderId === null) {
+      throw new BadRequestException('Gender is required');
     }
     const phone = this.normalizedPhilippinePhone(payload.phone ?? '').stored;
     await this.requireVerifiedEmail(email, payload.email_verification_id);
@@ -757,7 +787,9 @@ export class AuthService {
         .input('phone', sql.NVarChar(20), phone)
         .input('idTypeId', sql.TinyInt, idTypes[0]?.idTypeId ?? null)
         .input('idNumber', sql.NVarChar(100), idNumber)
+        .input('genderId', sql.TinyInt, genderId)
         .input('styleId', sql.SmallInt, styleId)
+        .input('fashionStyle', sql.NVarChar(500), fashionStyles.join(','))
         .input('preferredSizeId', sql.SmallInt, preferredSizeId)
         .input('skinToneDetected', sql.Bit, skinHex ? 1 : 0)
         .input('skinHex', sql.NVarChar(7), skinHex)
@@ -772,7 +804,9 @@ export class AuthService {
             phone,
             id_type_id,
             id_number,
+            gender_id,
             style_id,
+            fashion_style,
             preferred_size_id,
             skin_tone_detected,
             skin_hex,
@@ -791,7 +825,9 @@ export class AuthService {
             @phone,
             @idTypeId,
             @idNumber,
+            @genderId,
             @styleId,
+            @fashionStyle,
             @preferredSizeId,
             @skinToneDetected,
             @skinHex,
@@ -806,6 +842,7 @@ export class AuthService {
     );
 
     const userId = inserted[0].userId;
+    await this.saveUserStyleAudiences(userId, audienceIds ?? []);
 
     if (shippingAddress) {
       await this.databaseService.request((request) =>
@@ -840,7 +877,9 @@ export class AuthService {
 
   async updateAppProfile(userId: string, body: unknown) {
     const payload = body as AppRegisterBody;
-    const styleLabel = payload.fashion_style?.split(',')[0]?.trim() || null;
+    const fashionStyles = await this.validatedFashionStyles(payload.fashion_style);
+    const audienceIds = await this.validatedStyleAudienceIds(payload.audienceIds, false);
+    const styleLabel = fashionStyles[0] ?? null;
     const preferredSizeLabel = payload.preferred_size?.trim() || null;
     const skinHex = this.normalizeSkinHex(payload.skin_hex);
     const bodyChestCm = this.toNullableNumber(payload.body_chest_cm);
@@ -867,6 +906,7 @@ export class AuthService {
       request
         .input('userId', sql.UniqueIdentifier, userId)
         .input('styleId', sql.SmallInt, styleId)
+        .input('fashionStyle', sql.NVarChar(500), fashionStyles.join(','))
         .input('preferredSizeId', sql.SmallInt, preferredSizeId)
         .input('skinToneDetected', sql.Bit, skinHex ? 1 : 0)
         .input('skinHex', sql.NVarChar(7), skinHex)
@@ -877,6 +917,7 @@ export class AuthService {
           UPDATE USERS
           SET
             style_id = @styleId,
+            fashion_style = @fashionStyle,
             preferred_size_id = @preferredSizeId,
             skin_tone_detected = @skinToneDetected,
             skin_hex = @skinHex,
@@ -887,6 +928,7 @@ export class AuthService {
           WHERE user_id = @userId AND is_active = 1 AND is_admin = 0
         `),
     );
+    if (audienceIds !== null) await this.saveUserStyleAudiences(userId, audienceIds);
 
     const user = await this.findAppUserById(userId);
 
@@ -913,6 +955,7 @@ export class AuthService {
       .filter(Boolean)
       .join(', ') || null;
     const streetLine = [addressHouseNo, addressStreet].filter(Boolean).join(', ') || shippingAddress;
+    const genderId = await this.findGenderId(payload.gender);
 
     if (!userId?.trim()) {
       throw new BadRequestException('User id is required');
@@ -920,6 +963,9 @@ export class AuthService {
 
     if (!email || !fullName) {
       throw new BadRequestException('Full name and email are required');
+    }
+    if (genderId === null) {
+      throw new BadRequestException('Gender is required');
     }
     this.validateAppAccountFields({
       email,
@@ -949,6 +995,7 @@ export class AuthService {
         .input('email', sql.NVarChar(255), email)
         .input('fullName', sql.NVarChar(150), fullName)
         .input('phone', sql.NVarChar(20), phone)
+        .input('genderId', sql.TinyInt, genderId)
         .input('street', sql.NVarChar(255), streetLine)
         .input('barangay', sql.NVarChar(100), addressBarangay)
         .input('city', sql.NVarChar(100), addressCity)
@@ -958,7 +1005,8 @@ export class AuthService {
           SET
             email = @email,
             full_name = @fullName,
-            phone = @phone
+            phone = @phone,
+            gender_id = @genderId
           WHERE user_id = @userId AND is_active = 1 AND is_admin = 0
 
           DECLARE @addressId uniqueidentifier = (
@@ -1000,6 +1048,48 @@ export class AuthService {
       throw new BadRequestException('User was not found');
     }
 
+    return { user };
+  }
+
+  async updateAppProfilePhoto(userId: string, file: UploadedProfileFile | undefined) {
+    if (!file) throw new BadRequestException('Choose a PNG, JPEG, or WebP profile photo.');
+
+    const profilePhotoUrl = `/uploads/profiles/${file.filename}`;
+    await this.databaseService.request((request) => request
+      .input('userId', sql.UniqueIdentifier, userId)
+      .input('profilePhotoUrl', sql.NVarChar(500), profilePhotoUrl).query(`
+        UPDATE USERS
+        SET profile_photo_url = @profilePhotoUrl
+        WHERE user_id = @userId AND is_active = 1 AND is_admin = 0
+      `));
+
+    const user = await this.findAppUserById(userId);
+    if (!user) throw new BadRequestException('User was not found');
+    return { user };
+  }
+
+  async updateAppProfileCover(userId: string, file: UploadedProfileFile | undefined) {
+    if (!file) throw new BadRequestException('Choose a PNG, JPEG, or WebP cover image.');
+    const coverPhotoUrl = `/uploads/profiles/${file.filename}`;
+    await this.databaseService.request((request) => request
+      .input('userId', sql.UniqueIdentifier, userId)
+      .input('coverPhotoUrl', sql.NVarChar(500), coverPhotoUrl).query(`
+        UPDATE USERS SET cover_photo_url = @coverPhotoUrl
+        WHERE user_id = @userId AND is_active = 1 AND is_admin = 0
+      `));
+    const user = await this.findAppUserById(userId);
+    if (!user) throw new BadRequestException('User was not found');
+    return { user };
+  }
+
+  async removeAppProfileCover(userId: string) {
+    await this.databaseService.request((request) => request
+      .input('userId', sql.UniqueIdentifier, userId).query(`
+        UPDATE USERS SET cover_photo_url = NULL
+        WHERE user_id = @userId AND is_active = 1 AND is_admin = 0
+      `));
+    const user = await this.findAppUserById(userId);
+    if (!user) throw new BadRequestException('User was not found');
     return { user };
   }
 
@@ -1287,6 +1377,38 @@ export class AuthService {
     return styles[0].styleId;
   }
 
+  private async validatedFashionStyles(value?: string | null) {
+    const labels = Array.from(new Set((value ?? '').split(',').map((item) => item.trim()).filter(Boolean)));
+    if (!labels.length) return [];
+
+    const valid = await this.databaseService.request<{ label: string }>((request) =>
+      request.query(`SELECT label FROM FASHION_STYLES`),
+    );
+    const available = new Map(valid.map((item) => [item.label.toLowerCase(), item.label]));
+    const normalized = labels.map((label) => available.get(label.toLowerCase()));
+    if (normalized.some((label) => !label)) {
+      throw new BadRequestException('Selected fashion style is not available');
+    }
+    return normalized as string[];
+  }
+
+  private async findGenderId(value?: string | null) {
+    const label = value?.trim();
+    if (!label) return null;
+
+    const rows = await this.databaseService.request<{ genderId: number }>((request) =>
+      request.input('label', sql.NVarChar(50), label).query(`
+        SELECT TOP 1 gender_id AS genderId
+        FROM GENDERS
+        WHERE LOWER(label) = LOWER(@label)
+      `),
+    );
+    if (!rows[0]?.genderId) {
+      throw new BadRequestException('Selected gender is not available');
+    }
+    return rows[0].genderId;
+  }
+
   private async findSizeId(sizeLabel: string | null) {
     if (!sizeLabel) {
       return null;
@@ -1346,6 +1468,9 @@ export class AuthService {
           a.postal_code AS address_zip,
           u.id_number,
           u.profile_photo_url,
+          u.cover_photo_url,
+          audiences.ids AS audienceIds,
+          audiences.labels AS audienceLabels,
           u.skin_tone_detected,
           u.skin_hex,
           CAST(u.body_chest_cm AS float) AS body_chest_cm,
@@ -1354,11 +1479,21 @@ export class AuthService {
           CAST(u.body_height_cm AS float) AS body_height_cm,
           u.is_admin,
           u.is_active,
-          fs.label AS fashion_style,
+          COALESCE(NULLIF(u.fashion_style, ''), fs.label) AS fashion_style,
+          g.label AS gender,
           ps.label AS preferred_size
         FROM USERS u
         LEFT JOIN FASHION_STYLES fs ON fs.style_id = u.style_id
+        LEFT JOIN GENDERS g ON g.gender_id = u.gender_id
         LEFT JOIN SIZE_STANDARDS ps ON ps.size_id = u.preferred_size_id
+        OUTER APPLY (
+          SELECT
+            STRING_AGG(CONVERT(varchar(3), usa.audience_id), ',') WITHIN GROUP (ORDER BY usa.audience_id) AS ids,
+            STRING_AGG(sa.label, ', ') WITHIN GROUP (ORDER BY usa.audience_id) AS labels
+          FROM USER_STYLE_AUDIENCES usa
+          INNER JOIN STYLE_AUDIENCES sa ON sa.audience_id = usa.audience_id
+          WHERE usa.user_id = u.user_id
+        ) audiences
         OUTER APPLY (
           SELECT TOP 1
             street,
@@ -1382,6 +1517,26 @@ export class AuthService {
       `),
     );
 
-    return users[0] ?? null;
+    const user = users[0] as (Record<string, unknown> & { audienceIds?: string | null }) | undefined;
+    return user ? { ...user, audienceIds: user.audienceIds ? String(user.audienceIds).split(',').map(Number).filter(Number.isFinite) : [] } : null;
+  }
+
+  private async validatedStyleAudienceIds(value: unknown, required: boolean) {
+    if (value === undefined) {
+      if (required) throw new BadRequestException('Select at least one shopping preference.');
+      return null;
+    }
+    if (!Array.isArray(value)) throw new BadRequestException('Shopping preferences must be a list.');
+    const ids = [...new Set(value.map(Number))];
+    if (!ids.length || ids.some((id) => ![1, 2, 3].includes(id))) throw new BadRequestException('Select one or more valid shopping preferences.');
+    await this.databaseService.ensureStyleAudienceSchema();
+    return ids;
+  }
+
+  private async saveUserStyleAudiences(userId: string, audienceIds: number[]) {
+    await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, userId).query(`DELETE FROM USER_STYLE_AUDIENCES WHERE user_id = @userId`));
+    for (const audienceId of audienceIds) {
+      await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, userId).input('audienceId', sql.TinyInt, audienceId).query(`INSERT INTO USER_STYLE_AUDIENCES (user_id, audience_id) VALUES (@userId, @audienceId)`));
+    }
   }
 }

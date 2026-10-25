@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
@@ -63,6 +63,16 @@ export class CartController {
   removeItem(@Param('cartItemId') cartItemId: string, @Body('userId') userId: string | undefined, @Req() request: { user?: SessionIdentity }) {
     requireOwnership(request.user, userId);
     return this.cartService.removeItem(cartItemId, userId);
+  }
+
+  @Patch('items/:cartItemId')
+  updateQuantity(
+    @Param('cartItemId') cartItemId: string,
+    @Body() body: { userId?: string; quantity?: number | string },
+    @Req() request: { user?: SessionIdentity },
+  ) {
+    requireOwnership(request.user, body.userId);
+    return this.cartService.updateQuantity(cartItemId, body.userId, body.quantity);
   }
 
   @Post('checkout')

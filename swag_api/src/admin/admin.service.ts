@@ -137,6 +137,41 @@ export class AdminService {
     };
   }
 
+  async popularStyles(period = 'month') {
+    const days = period === 'year' ? 365 : period === 'quarter' ? 90 : 31;
+    const rows = await this.databaseService.request<any>((request) => request.input('days', sql.Int, days).query(`
+      DECLARE @start datetime2 = DATEADD(day, -@days, GETDATE());
+      DECLARE @previousStart datetime2 = DATEADD(day, -(@days * 2), GETDATE());
+      WITH productStats AS (
+        SELECT style_id, COUNT(*) AS products, MIN(price) AS minPrice, MAX(price) AS maxPrice
+        FROM PRODUCTS WHERE style_id IS NOT NULL GROUP BY style_id
+      ), preferenceStats AS (
+        SELECT fs.style_id, COUNT(DISTINCT u.user_id) AS customers
+        FROM FASHION_STYLES fs LEFT JOIN USERS u ON u.is_admin = 0 AND (u.style_id = fs.style_id OR CONCAT(',', REPLACE(ISNULL(u.fashion_style,''), ' ', ''), ',') LIKE CONCAT('%,', REPLACE(fs.label, ' ', ''), ',%'))
+        GROUP BY fs.style_id
+      ), currentSales AS (
+        SELECT p.style_id, SUM(oi.quantity) AS unitsSold, SUM(oi.quantity * oi.unit_price) AS revenue
+        FROM ORDER_ITEMS oi JOIN ORDERS o ON o.order_id = oi.order_id JOIN PRODUCTS p ON p.product_id = oi.product_id
+        LEFT JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE p.style_id IS NOT NULL AND o.placed_at >= @start
+          AND (LOWER(ISNULL(o.payment_status,'')) IN ('verified', 'paid') OR LOWER(ISNULL(os.label,'')) LIKE '%deliver%' OR LOWER(ISNULL(os.label,'')) LIKE '%complete%')
+        GROUP BY p.style_id
+      ), previousSales AS (
+        SELECT p.style_id, SUM(oi.quantity) AS unitsSold
+        FROM ORDER_ITEMS oi JOIN ORDERS o ON o.order_id = oi.order_id JOIN PRODUCTS p ON p.product_id = oi.product_id
+        LEFT JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        WHERE p.style_id IS NOT NULL AND o.placed_at >= @previousStart AND o.placed_at < @start
+          AND (LOWER(ISNULL(o.payment_status,'')) IN ('verified', 'paid') OR LOWER(ISNULL(os.label,'')) LIKE '%deliver%' OR LOWER(ISNULL(os.label,'')) LIKE '%complete%')
+        GROUP BY p.style_id
+      )
+      SELECT fs.style_id AS styleId, fs.label AS style, ISNULL(ps.products,0) AS products, ISNULL(cs.unitsSold,0) AS unitsSold, CAST(ISNULL(cs.revenue,0) AS float) AS revenue, CAST(ps.minPrice AS float) AS minPrice, CAST(ps.maxPrice AS float) AS maxPrice, ISNULL(pref.customers,0) AS customers,
+        CASE WHEN ISNULL(cs.unitsSold,0)=0 THEN 'Low' WHEN ISNULL(prev.unitsSold,0)=0 THEN 'New' WHEN cs.unitsSold >= prev.unitsSold * 1.2 THEN 'Trending' WHEN cs.unitsSold <= prev.unitsSold * .8 THEN 'Low' ELSE 'Steady' END AS demandStatus
+      FROM FASHION_STYLES fs LEFT JOIN productStats ps ON ps.style_id=fs.style_id LEFT JOIN preferenceStats pref ON pref.style_id=fs.style_id LEFT JOIN currentSales cs ON cs.style_id=fs.style_id LEFT JOIN previousSales prev ON prev.style_id=fs.style_id
+      ORDER BY ISNULL(cs.unitsSold,0) DESC, ISNULL(pref.customers,0) DESC, ISNULL(cs.revenue,0) DESC, fs.label;
+    `));
+    return rows.map((row, index) => ({ ...row, rank: index + 1 }));
+  }
+
   async salesReport() {
     const [summary, monthlySales, monthlyTransactions, recentTransactions, topProducts] = await Promise.all([
       this.databaseService.query(`

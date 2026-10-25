@@ -3,6 +3,7 @@ export class CreateProductDto {
   description?: string;
   categoryId?: number;
   genderId?: number | null;
+  audienceIds?: number[];
   sizeId?: number | null;
   garmentTypeId?: number | null;
   measurements?: Array<{

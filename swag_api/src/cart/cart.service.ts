@@ -249,6 +249,33 @@ export class CartService {
     return { deleted: true, id: cartItemId };
   }
 
+  async updateQuantity(cartItemId?: string, userId?: string, requestedQuantity?: number | string) {
+    const quantity = Number(requestedQuantity);
+    if (!cartItemId || !userId || !Number.isInteger(quantity) || quantity < 1) {
+      throw new BadRequestException('A cart item, user, and quantity of at least one are required');
+    }
+
+    const rows = await this.databaseService.request<{ stockQty: number; currentQuantity: number }>((request) => request
+      .input('cartItemId', sql.UniqueIdentifier, cartItemId)
+      .input('userId', sql.UniqueIdentifier, userId)
+      .query(`
+        SELECT COALESCE(pss.stock_qty, p.stock_qty, 0) AS stockQty, ci.quantity AS currentQuantity
+        FROM CART_ITEMS ci
+        INNER JOIN PRODUCTS p ON p.product_id = ci.product_id AND p.is_active = 1
+        LEFT JOIN PRODUCT_SIZE_STOCK pss ON pss.product_id = ci.product_id AND pss.size_id = ci.size_id
+        WHERE ci.cart_item_id = @cartItemId AND ci.user_id = @userId
+      `));
+    if (!rows[0]) throw new NotFoundException('Cart item not found');
+    if (quantity > Number(rows[0].stockQty)) throw new BadRequestException('Selected quantity is not available');
+
+    await this.databaseService.request((request) => request
+      .input('cartItemId', sql.UniqueIdentifier, cartItemId)
+      .input('userId', sql.UniqueIdentifier, userId)
+      .input('quantity', sql.Int, quantity)
+      .query('UPDATE CART_ITEMS SET quantity = @quantity WHERE cart_item_id = @cartItemId AND user_id = @userId'));
+    return { id: cartItemId, quantity };
+  }
+
   async evaluateCheckoutShipping(
     userId?: string,
     addressId?: string,
