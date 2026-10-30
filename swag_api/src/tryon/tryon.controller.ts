@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Post, Body, UploadedFiles, UseInterceptors } from '@nestjs/common';
+import { Controller, Get, Param, Post, Body, UploadedFiles, UseInterceptors, StreamableFile } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { memoryStorage } from 'multer';
 import { TryonService } from './tryon.service';
@@ -58,5 +58,14 @@ export class TryonController {
   @Get('progress/:jobId')
   progress(@Param('jobId') jobId: string) {
     return this.tryonService.progress(jobId);
+  }
+
+  @Get('results/:filename')
+  async resultImage(@Param('filename') filename: string) {
+    const image = await this.tryonService.resultImage(filename);
+    return new StreamableFile(image, {
+      type: 'image/jpeg',
+      disposition: 'inline',
+    });
   }
 }
