@@ -197,3 +197,50 @@ body, html { height: 100%; width: 100%; }
   opacity: 0.6;
   text-transform: uppercase;
 }
+
+/* Password-recovery refinements retain the existing A'FRO split-screen look. */
+.reset-page { min-height: 100svh; height: auto; padding: 32px 20px; background: #f1f3f6; }
+.reset-card { width: min(950px, 100%); min-height: 570px; height: auto; border-radius: 12px; box-shadow: 0 18px 44px rgba(20, 42, 78, .16); }
+.reset-card .login-left { padding: 54px 50px 44px; justify-content: flex-start; gap: 0; }
+.reset-card .login-right { background: #1e4378; width: 48%; }
+.reset-card .login-right h2 { color: #fff; font-size: clamp(2rem, 3.2vw, 2.8rem); font-weight: 800; line-height: 1.08; text-align: center; }
+.reset-card .login-right p { font-size: 11px; letter-spacing: 4px; }
+.reset-heading { margin: 34px 0 24px; }
+.reset-step { color: #58709a; font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.reset-title { margin: 9px 0 10px; color: #183d70; font-size: 29px; letter-spacing: -.03em; }
+.reset-copy { margin: 0; color: #536174; font-size: 14px; line-height: 1.65; max-width: 360px; }
+.reset-form { gap: 18px; }
+.form-field { display: grid; gap: 8px; color: #172b4a; font-size: 13px; font-weight: 700; }
+.login-form .form-field input, .login-form input[type="email"] { width: 100%; min-height: 48px; padding: 0 14px; border: 1px solid #c9d2df; border-radius: 8px; background: #fff; color: #152743; font-size: 15px; box-shadow: 0 1px 2px rgba(22, 44, 77, .04); transition: border-color .18s ease, box-shadow .18s ease; }
+.login-form .form-field input:hover { border-color: #99abc4; }
+.login-form .form-field input:focus { border-color: #2867c7; box-shadow: 0 0 0 3px rgba(40, 103, 199, .14); }
+.login-form .form-field input:disabled { background: #f4f6f8; color: #7b8797; }
+.otp-input { letter-spacing: .38em; font-size: 19px !important; font-weight: 700; text-align: center; }
+.password-wrapper { position: relative; }
+.login-form .password-wrapper input { padding-right: 48px; }
+.password-toggle { position: absolute; right: 8px; top: 50%; width: 34px !important; min-height: 34px !important; margin: 0 !important; padding: 0 !important; transform: translateY(-50%); border: 0 !important; border-radius: 6px !important; background: transparent !important; color: #5c6e87 !important; display: grid; place-items: center; font-size: 19px !important; }
+.password-toggle:hover, .password-toggle:focus-visible { color: #1e5eb9 !important; background: #eef4fd !important; }
+.reset-primary-button { min-height: 48px; margin-top: 2px !important; border-radius: 8px !important; background: #2864d7 !important; box-shadow: 0 7px 14px rgba(32, 90, 194, .2); }
+.reset-primary-button:hover:not(:disabled) { background: #1e54bc !important; }
+.reset-primary-button:focus-visible, .reset-link-button:focus-visible, .reset-back:focus-visible { outline: 3px solid rgba(40, 103, 199, .28); outline-offset: 3px; }
+.reset-link-button { width: fit-content !important; min-height: auto !important; margin: -7px 0 0 auto !important; padding: 3px 0 !important; border: 0; background: transparent !important; color: #245fb8 !important; font-size: 12px !important; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; box-shadow: none !important; }
+.reset-link-button:disabled { color: #8190a5 !important; opacity: 1 !important; text-decoration: none; }
+.reset-message { margin: -2px 0 0; padding: 10px 12px; border-radius: 7px; font-size: 12px; line-height: 1.45; }
+.reset-message.success { border: 1px solid #bce2cd; background: #edf9f1; color: #17683a; }
+.reset-message.error { border: 1px solid #f1c6c6; background: #fff4f4; color: #a22929; }
+.reset-back { margin-top: 25px; color: #245fb8; font-size: 13px; font-weight: 600; text-align: center; }
+.reset-back:hover { color: #173f80; text-decoration: underline; }
+
+@media (max-width: 720px) {
+  .reset-page { align-items: flex-start; padding: 20px 14px; }
+  .reset-card { display: block; min-height: 0; max-width: 510px; }
+  .reset-card .login-left { width: 100%; padding: 38px 30px; }
+  .reset-card .login-right { display: none; }
+  .reset-heading { margin: 28px 0 22px; }
+}
+
+@media (max-width: 390px) {
+  .reset-card .login-left { padding: 30px 22px; }
+  .reset-title { font-size: 25px; }
+  .otp-input { letter-spacing: .25em; }
+}

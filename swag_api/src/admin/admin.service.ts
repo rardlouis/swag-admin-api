@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import * as sql from 'mssql/msnodesqlv8';
 import * as XLSX from 'xlsx';
 import { assertCleanText } from '../common/profanity';
@@ -25,6 +25,7 @@ type NotificationRow = {
 };
 
 type UpdateProfileBody = {
+  username?: string;
   fullName?: string;
   email?: string;
   phone?: string;
@@ -42,6 +43,7 @@ type ChangePasswordBody = {
 };
 
 type CreateAdminBody = {
+  username?: string;
   fullName?: string;
   email?: string;
   phone?: string;
@@ -77,6 +79,7 @@ type VoucherBody = {
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
   private readonly geminiBotUserId = '11111111-1111-4111-8111-111111111111';
 
   constructor(private readonly databaseService: DatabaseService, private readonly notificationsService: NotificationsService) {}
@@ -1103,12 +1106,14 @@ export class AdminService {
 
   async createAdmin(body: unknown) {
     const payload = body as CreateAdminBody;
+    const username = payload.username?.trim().toLowerCase() ?? '';
     const fullName = payload.fullName?.trim() ?? '';
     const email = payload.email?.trim().toLowerCase() ?? '';
     const phone = payload.phone?.trim() || null;
     const password = payload.password ?? '';
 
     if (fullName.length < 2 || fullName.length > 150) throw new BadRequestException('Enter an administrator name from 2 to 150 characters.');
+    if (!/^[a-z0-9._-]{3,64}$/.test(username)) throw new BadRequestException('Enter a username with 3–64 letters, numbers, periods, underscores, or hyphens.');
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) throw new BadRequestException('Enter a valid administrator email.');
     assertPasswordRequirements(password);
     if (password !== (payload.confirmPassword ?? '')) throw new BadRequestException('Password confirmation does not match.');
@@ -1120,10 +1125,11 @@ export class AdminService {
     if (idType && !idTypeRows[0]) throw new BadRequestException('Selected ID type does not exist.');
 
     const duplicate = await this.databaseService.request<{ count: number }>((request) =>
-      request.input('email', sql.NVarChar(255), email).input('phone', sql.NVarChar(30), phone).query(`
+      request.input('email', sql.NVarChar(255), email).input('username', sql.NVarChar(64), username).input('phone', sql.NVarChar(30), phone).query(`
         SELECT COUNT(*) AS count
         FROM USERS
         WHERE LOWER(email) = LOWER(@email)
+          OR LOWER(admin_username) = @username
           OR (@phone IS NOT NULL AND phone = @phone)
       `),
     );
@@ -1133,23 +1139,39 @@ export class AdminService {
     const created = await this.databaseService.request<{ id: string; email: string; fullName: string; phone: string | null }>((request) =>
       request
         .input('email', sql.NVarChar(255), email)
+        .input('username', sql.NVarChar(64), username)
         .input('passwordHash', sql.NVarChar(255), passwordHash)
         .input('fullName', sql.NVarChar(150), fullName)
         .input('phone', sql.NVarChar(30), phone)
         .input('idTypeId', sql.TinyInt, idTypeRows[0]?.idTypeId ?? null)
         .input('idNumber', sql.NVarChar(100), payload.idNumber?.trim() || null).query(`
-          INSERT INTO USERS (email, password_hash, full_name, phone, id_type_id, id_number, is_admin, is_active)
-          OUTPUT CONVERT(varchar(36), inserted.user_id) AS id, inserted.email, inserted.full_name AS fullName, inserted.phone
-          VALUES (@email, @passwordHash, @fullName, @phone, @idTypeId, @idNumber, 1, 1)
+          INSERT INTO USERS (email, admin_username, password_hash, full_name, phone, id_type_id, id_number, is_admin, is_active)
+          OUTPUT CONVERT(varchar(36), inserted.user_id) AS id, inserted.admin_username AS username, inserted.email, inserted.full_name AS fullName, inserted.phone
+          VALUES (@email, @username, @passwordHash, @fullName, @phone, @idTypeId, @idNumber, 1, 1)
         `),
     );
     return created[0];
   }
 
+  async profile(userId: string) {
+    const admin = await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, userId).query(`
+      SELECT TOP 1 CONVERT(varchar(36), u.user_id) AS id, u.admin_username AS username, u.email,
+        u.full_name AS fullName, u.phone, u.profile_photo_url AS profilePhotoUrl,
+        idt.label AS idType, u.id_number AS idNumber, u.is_admin AS isAdmin,
+        u.is_active AS isActive
+      FROM USERS u
+      LEFT JOIN ID_TYPES idt ON idt.id_type_id = u.id_type_id
+      WHERE u.user_id = @userId AND u.is_admin = 1
+    `));
+    if (!admin[0]) throw new NotFoundException('Administrator account not found.');
+    return admin[0];
+  }
+
   async updateProfile(userId: string, body: unknown) {
     const payload = body as UpdateProfileBody;
+    const username = payload.username?.trim().toLowerCase() || null;
     const fullName = payload.fullName?.trim();
-    const email = payload.email?.trim();
+    const email = payload.email?.trim().toLowerCase();
     const phone = payload.phone?.trim() || null;
     const idType = payload.idType?.trim() || null;
     const idNumber = payload.idNumber?.trim() || null;
@@ -1159,21 +1181,14 @@ export class AdminService {
     if (!fullName || !email) {
       throw new BadRequestException('Full name and email are required');
     }
+    if (username && !/^[a-z0-9._-]{3,64}$/.test(username)) throw new BadRequestException('Username must be 3–64 letters, numbers, periods, underscores, or hyphens.');
+    if (fullName.length > 150) throw new BadRequestException('Full name must be 150 characters or fewer.');
+    if (email.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new BadRequestException('Enter a valid email address.');
+    if (phone && phone.length > 30) throw new BadRequestException('Phone number must be 30 characters or fewer.');
+    if (idNumber && idNumber.length > 100) throw new BadRequestException('ID number must be 100 characters or fewer.');
 
     if (password || confirmPassword) {
       throw new BadRequestException('Use the Change Password section and enter your current password.');
-    }
-
-    const existing = await this.databaseService.request<{ id: string }>((request) =>
-      request.input('userId', sql.UniqueIdentifier, userId).query(`
-        SELECT CONVERT(varchar(36), user_id) AS id
-        FROM USERS
-        WHERE user_id = @userId AND is_admin = 1
-      `),
-    );
-
-    if (!existing[0]) {
-      throw new NotFoundException('Admin user not found');
     }
 
     const idTypeRows = idType
@@ -1190,48 +1205,53 @@ export class AdminService {
       throw new BadRequestException('Selected ID type does not exist');
     }
 
-    await this.databaseService.request((request) => {
-      request
+    const duplicate = await this.databaseService.request<{ count: number }>((request) => request
+      .input('email', sql.NVarChar(255), email)
+      .input('username', sql.NVarChar(64), username)
+      .input('userId', sql.UniqueIdentifier, userId)
+      .query(`SELECT COUNT(*) AS count FROM USERS WHERE user_id <> @userId
+        AND (LOWER(email) = LOWER(@email) OR (@username IS NOT NULL AND LOWER(admin_username) = @username))`));
+    if (Number(duplicate[0]?.count)) throw new ConflictException('That email address or username is already in use.');
+
+    let updated: unknown[];
+    try {
+      updated = await this.databaseService.request((request) => {
+        request
         .input('userId', sql.UniqueIdentifier, userId)
+        .input('username', sql.NVarChar(64), username)
         .input('fullName', sql.NVarChar(255), fullName)
         .input('email', sql.NVarChar(255), email)
         .input('phone', sql.NVarChar(30), phone)
         .input('idTypeId', sql.TinyInt, idTypeRows[0]?.idTypeId ?? null)
-        .input('idNumber', sql.NVarChar(100), idNumber)
-        .input('isActive', sql.Bit, payload.isActive === false ? 0 : 1);
+        .input('idNumber', sql.NVarChar(100), idNumber);
 
       return request.query(`
         UPDATE USERS
         SET
+          admin_username = @username,
           full_name = @fullName,
           email = @email,
           phone = @phone,
           id_type_id = @idTypeId,
           id_number = @idNumber,
-          is_active = @isActive
+          updated_at = GETDATE()
+        OUTPUT CONVERT(varchar(36), inserted.user_id) AS id, inserted.email,
+          inserted.full_name AS fullName, inserted.phone,
+          inserted.profile_photo_url AS profilePhotoUrl, inserted.id_number AS idNumber,
+          inserted.is_admin AS isAdmin, inserted.is_active AS isActive
         WHERE user_id = @userId AND is_admin = 1
       `);
-    });
-
-    const updated = await this.databaseService.request((request) =>
-      request.input('userId', sql.UniqueIdentifier, userId).query(`
-        SELECT TOP 1
-          CONVERT(varchar(36), u.user_id) AS id,
-          u.email,
-          u.full_name AS fullName,
-          u.phone,
-          u.profile_photo_url AS profilePhotoUrl,
-          idt.label AS idType,
-          u.id_number AS idNumber,
-          u.is_admin AS isAdmin,
-          u.is_active AS isActive
-        FROM USERS u
-        LEFT JOIN ID_TYPES idt ON idt.id_type_id = u.id_type_id
-        WHERE u.user_id = @userId
-      `),
-    );
-
-    return updated[0];
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/UQ_USERS_EMAIL|duplicate key|unique constraint/i.test(message)) throw new ConflictException('That email address is already in use.');
+      this.logger.error(`Unable to update administrator profile ${userId}`, error instanceof Error ? error.stack : message);
+      throw error;
+    }
+    if (!updated[0]) throw new NotFoundException('Administrator account not found.');
+    // Fetch the joined ID label from the persisted row; never fabricate it in
+    // the browser from the submitted value.
+    return this.profile(userId);
   }
 
   async updateProfilePhoto(userId: string, file: UploadedProfileFile | undefined) {

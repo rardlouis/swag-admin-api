@@ -53,4 +53,10 @@ async function bootstrap() {
   // can narrow this with HOST without changing client code.
   await app.listen(process.env.PORT ?? 5000, process.env.HOST ?? '0.0.0.0');
 }
-bootstrap();
+bootstrap().catch((error: unknown) => {
+  // Preserve the actual startup failure (database/migration/bind error) rather
+  // than leaving the frontend with only a generic connection failure.
+  const detail = error instanceof Error ? error.stack ?? error.message : String(error);
+  console.error(`API startup failed: ${detail}`);
+  process.exitCode = 1;
+});

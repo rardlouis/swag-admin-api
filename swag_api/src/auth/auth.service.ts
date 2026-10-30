@@ -42,7 +42,7 @@ type AppRegisterBody = {
 
 type UploadedProfileFile = { filename: string };
 
-type EmailOtpPurpose = 'registration' | 'password_reset' | 'admin_password_reset' | 'password_change';
+type EmailOtpPurpose = 'registration' | 'password_reset' | 'admin_password_reset' | 'password_change' | 'admin_password_change';
 
 @Injectable()
 export class AuthService {
@@ -85,16 +85,13 @@ export class AuthService {
         WHERE LOWER(email) = LOWER(@email) AND is_admin = ${isAdmin ? 1 : 0} AND is_active = 1
       `),
     );
-    // Do not reveal whether a customer account exists. The UI can show the
-    // same neutral success message for every syntactically valid email.
-    // Administrator recovery deliberately remains distinct because it is an
-    // internal account-management flow with a separate route and purpose.
-    if (!user[0] && !isAdmin) return { expiresAt: null, resendAfterSeconds: 60 };
-    if (!user[0]) throw new BadRequestException('No active administrator was found for that email address.');
+    // A recovery request must not disclose whether an account exists. This is
+    // deliberately identical for customer and administrator recovery.
+    if (!user[0]) return { expiresAt: null, resendAfterSeconds: 60 };
     return this.sendEmailOtpForPurpose(email, purpose, `Your A'FRO ${isAdmin ? 'administrator ' : ''}password reset code`);
   }
 
-  private async sendEmailOtpForPurpose(email: string, purpose: EmailOtpPurpose, subject: string) {
+  private async sendEmailOtpForPurpose(email: string, purpose: EmailOtpPurpose, subject: string, accountUserId?: string) {
     let verificationId: string;
     let code: string;
     let expiresAt: Date;
@@ -107,19 +104,21 @@ export class AuthService {
         ? Math.max(0, 60 - Math.max(0, Number(latest[0].secondsSinceCreation ?? 0)))
         : 0;
       if (latest[0] && secondsUntilResend > 0) throw new BadRequestException(`Please wait ${secondsUntilResend} seconds before requesting another code.`);
+      const recentRequests = await this.databaseService.request<{ count: number }>((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).query(`SELECT COUNT(*) AS count FROM EMAIL_OTPS WHERE email = @email AND purpose = @purpose AND created_at > DATEADD(MINUTE, -15, GETDATE())`));
+      if (Number(recentRequests[0]?.count) >= 5) throw new BadRequestException('Too many code requests. Please try again later.');
       verificationId = randomUUID();
       code = String(randomInt(0, 1_000_000)).padStart(6, '0');
       expiresAt = new Date(Date.now() + 5 * 60_000);
       const invalidatePriorOtp = purpose === 'registration'
         ? 'verified_at IS NULL'
         : '1 = 1';
-      await this.databaseService.request((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).input('id', sql.UniqueIdentifier, verificationId).input('hash', sql.NVarChar(128), this.otpHash(email, purpose, code)).query(`
+      await this.databaseService.request((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).input('id', sql.UniqueIdentifier, verificationId).input('accountUserId', sql.UniqueIdentifier, accountUserId ?? null).input('hash', sql.NVarChar(128), this.otpHash(email, purpose, code)).query(`
         UPDATE EMAIL_OTPS
         SET invalidated_at = GETDATE(), reset_session_id = NULL, reset_session_expires_at = NULL
         WHERE email = @email AND purpose = @purpose AND ${invalidatePriorOtp} AND invalidated_at IS NULL;
 
-        INSERT INTO EMAIL_OTPS (verification_id, email, purpose, code_hash, expires_at, attempts)
-        VALUES (@id, @email, @purpose, @hash, DATEADD(MINUTE, 5, GETDATE()), 0);
+        INSERT INTO EMAIL_OTPS (verification_id, email, purpose, account_user_id, code_hash, expires_at, attempts)
+        VALUES (@id, @email, @purpose, @accountUserId, @hash, DATEADD(MINUTE, 5, GETDATE()), 0);
       `));
     } catch (error) {
       if (error instanceof BadRequestException) throw error;
@@ -157,17 +156,18 @@ export class AuthService {
     return this.verifyEmailOtpForPurpose(rawEmail, rawCode, 'admin_password_reset');
   }
 
-  private async verifyEmailOtpForPurpose(rawEmail: string | undefined, rawCode: string | undefined, purpose: EmailOtpPurpose) {
+  private async verifyEmailOtpForPurpose(rawEmail: string | undefined, rawCode: string | undefined, purpose: EmailOtpPurpose, accountUserId?: string) {
     const email = this.normalizedEmail(rawEmail ?? ''); const code = rawCode?.trim() ?? '';
     if (!/^\d{6}$/.test(code)) throw new BadRequestException('Enter the complete 6-digit code.');
     await this.ensureEmailOtpsTable();
-    const rows = await this.databaseService.request<{ id: string; codeHash: string; secondsRemaining: number; attempts: number }>((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).query(`
+    const rows = await this.databaseService.request<{ id: string; codeHash: string; secondsRemaining: number; attempts: number }>((request) => request.input('email', sql.NVarChar(255), email).input('purpose', sql.NVarChar(32), purpose).input('accountUserId', sql.UniqueIdentifier, accountUserId ?? null).query(`
       SELECT TOP 1 CONVERT(varchar(36), verification_id) AS id,
         code_hash AS codeHash,
         DATEDIFF(SECOND, GETDATE(), expires_at) AS secondsRemaining,
         attempts
       FROM EMAIL_OTPS
       WHERE email = @email AND purpose = @purpose AND verified_at IS NULL AND invalidated_at IS NULL
+        AND (@accountUserId IS NULL OR account_user_id = @accountUserId)
       ORDER BY created_at DESC
     `));
     const otp = rows[0];
@@ -379,10 +379,11 @@ export class AuthService {
 
     const users = await this.databaseService.request((request) =>
       request
-        .input('login', sql.NVarChar(255), login)
+        .input('login', sql.NVarChar(255), login.toLowerCase())
         .query(`
           SELECT TOP 1
             CONVERT(varchar(36), u.user_id) AS id,
+            u.admin_username AS username,
             u.email,
             u.full_name AS fullName,
             u.phone,
@@ -398,9 +399,10 @@ export class AuthService {
             u.is_active = 1
             AND u.is_admin = 1
             AND (
-              u.email = @login
-              OR u.full_name = @login
-              OR LEFT(u.email, CHARINDEX('@', u.email + '@') - 1) = @login
+              LOWER(u.email) = @login
+              OR LOWER(u.admin_username) = @login
+              OR LOWER(u.full_name) = @login
+              OR LOWER(LEFT(u.email, CHARINDEX('@', u.email + '@') - 1)) = @login
             )
         `),
     );
@@ -687,6 +689,55 @@ export class AuthService {
       UPDATE EMAIL_OTPS
       SET invalidated_at = GETDATE(), reset_session_id = NULL, reset_session_expires_at = NULL
       WHERE reset_session_id = @resetSessionId AND invalidated_at IS NULL;
+    `));
+    return { passwordChanged: true, signOutRequired: true, message: 'Password changed successfully. Please sign in again.' };
+  }
+
+  async sendAdminChangePasswordOtp(userId: string, currentPassword: string | undefined) {
+    const admins = await this.databaseService.request<{ email: string; passwordHash: string }>((request) => request
+      .input('userId', sql.UniqueIdentifier, userId)
+      .query(`SELECT TOP 1 email, password_hash AS passwordHash FROM USERS WHERE user_id = @userId AND is_admin = 1 AND is_active = 1`));
+    const admin = admins[0];
+    if (!admin || !(await passwordMatches(currentPassword ?? '', admin.passwordHash))) {
+      throw new BadRequestException('Your current password is incorrect.');
+    }
+    return this.sendEmailOtpForPurpose(admin.email, 'admin_password_change', "Your A'FRO administrator password change code", userId);
+  }
+
+  async verifyAdminChangePasswordOtp(userId: string, rawCode: string | undefined) {
+    const admins = await this.databaseService.request<{ email: string }>((request) => request
+      .input('userId', sql.UniqueIdentifier, userId)
+      .query(`SELECT TOP 1 email FROM USERS WHERE user_id = @userId AND is_admin = 1 AND is_active = 1`));
+    const admin = admins[0];
+    if (!admin) throw new UnauthorizedException('Administrator account not found.');
+    return this.verifyEmailOtpForPurpose(admin.email, rawCode, 'admin_password_change', userId);
+  }
+
+  async changeAdminPassword(userId: string, body: { resetSessionId?: string; password?: string; confirmPassword?: string }) {
+    const resetSessionId = body.resetSessionId?.trim() ?? '';
+    const password = body.password ?? '';
+    if (!this.isUuid(resetSessionId)) throw new BadRequestException('Verify your change password code before setting a new password.');
+    if (password !== (body.confirmPassword ?? '')) throw new BadRequestException('Password confirmation does not match.');
+    assertPasswordRequirements(password);
+    const admins = await this.databaseService.request<{ email: string; passwordHash: string }>((request) => request
+      .input('userId', sql.UniqueIdentifier, userId)
+      .query(`SELECT TOP 1 email, password_hash AS passwordHash FROM USERS WHERE user_id = @userId AND is_admin = 1 AND is_active = 1`));
+    const admin = admins[0];
+    if (!admin) throw new UnauthorizedException('Administrator account not found.');
+    if (await passwordMatches(password, admin.passwordHash)) throw new BadRequestException('Your new password must be different from your current password.');
+    await this.ensureEmailOtpsTable();
+    const verified = await this.databaseService.request<{ count: number }>((request) => request
+      .input('resetSessionId', sql.UniqueIdentifier, resetSessionId)
+      .input('userId', sql.UniqueIdentifier, userId)
+      .query(`SELECT COUNT(*) AS count FROM EMAIL_OTPS WHERE reset_session_id = @resetSessionId
+        AND purpose = 'admin_password_change' AND account_user_id = @userId
+        AND verified_at IS NOT NULL AND invalidated_at IS NULL AND reset_session_expires_at > GETDATE()`));
+    if (!Number(verified[0]?.count)) throw new BadRequestException('This password-change session has expired. Request a new code.');
+    const passwordHash = await hashPassword(password);
+    await this.databaseService.request((request) => request.input('userId', sql.UniqueIdentifier, userId).input('passwordHash', sql.NVarChar(255), passwordHash).input('resetSessionId', sql.UniqueIdentifier, resetSessionId).query(`
+      UPDATE USERS SET password_hash = @passwordHash WHERE user_id = @userId AND is_admin = 1;
+      UPDATE EMAIL_OTPS SET invalidated_at = GETDATE(), reset_session_id = NULL, reset_session_expires_at = NULL
+      WHERE reset_session_id = @resetSessionId AND account_user_id = @userId AND invalidated_at IS NULL;
     `));
     return { passwordChanged: true, signOutRequired: true, message: 'Password changed successfully. Please sign in again.' };
   }
@@ -1267,6 +1318,7 @@ export class AuthService {
           verification_id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
           email NVARCHAR(255) NOT NULL,
           purpose NVARCHAR(32) NOT NULL,
+          account_user_id UNIQUEIDENTIFIER NULL,
           code_hash NVARCHAR(128) NOT NULL,
           expires_at DATETIME2 NOT NULL,
           attempts INT NOT NULL DEFAULT 0,
@@ -1288,6 +1340,9 @@ export class AuthService {
     if (!(await this.databaseService.columnExists('EMAIL_OTPS', 'reset_session_id'))) {
       await this.databaseService.query(`ALTER TABLE dbo.EMAIL_OTPS ADD reset_session_id UNIQUEIDENTIFIER NULL`);
     }
+    if (!(await this.databaseService.columnExists('EMAIL_OTPS', 'account_user_id'))) {
+      await this.databaseService.query(`ALTER TABLE dbo.EMAIL_OTPS ADD account_user_id UNIQUEIDENTIFIER NULL`);
+    }
     if (!(await this.databaseService.columnExists('EMAIL_OTPS', 'reset_session_expires_at'))) {
       await this.databaseService.query(`ALTER TABLE dbo.EMAIL_OTPS ADD reset_session_expires_at DATETIME2 NULL`);
     }
@@ -1300,6 +1355,16 @@ export class AuthService {
       )
         CREATE INDEX IX_EMAIL_OTPS_EMAIL_PURPOSE_CREATED
           ON dbo.EMAIL_OTPS (email, purpose, created_at DESC)
+    `);
+    await this.databaseService.query(`
+      IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE name = 'IX_EMAIL_OTPS_ACCOUNT_PURPOSE_CREATED'
+          AND object_id = OBJECT_ID('dbo.EMAIL_OTPS')
+      )
+        CREATE INDEX IX_EMAIL_OTPS_ACCOUNT_PURPOSE_CREATED
+          ON dbo.EMAIL_OTPS (account_user_id, purpose, created_at DESC)
+          WHERE account_user_id IS NOT NULL
     `);
   }
 

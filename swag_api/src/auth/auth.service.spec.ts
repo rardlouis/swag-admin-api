@@ -127,3 +127,38 @@ describe('AuthService password reset sessions', () => {
     expect(queries.some(({ text }) => text.includes('reset_session_id = NULL'))).toBe(true);
   });
 });
+
+describe('AuthService administrator password changes', () => {
+  it('requires a reset session bound to the authenticated administrator', async () => {
+    const userId = '33333333-3333-4333-8333-333333333333';
+    const otherUserId = '44444444-4444-4444-8444-444444444444';
+    const resetSessionId = '55555555-5555-4555-8555-555555555555';
+    const database = {
+      query: jest.fn().mockResolvedValue([]),
+      columnExists: jest.fn().mockResolvedValue(true),
+      request: jest.fn(async (handler: (request: unknown) => Promise<{ recordset: unknown[] }>) => {
+        const values = new Map<string, unknown>();
+        const request = {
+          input: jest.fn((name: string, _type: unknown, value: unknown) => { values.set(name, value); return request; }),
+          query: jest.fn(async (text: string) => {
+            if (text.includes('FROM USERS WHERE user_id = @userId')) {
+              return { recordset: [{ email: 'admin@example.com', passwordHash: await hashPassword('OldPassword1') }] };
+            }
+            if (text.includes("purpose = 'admin_password_change'")) {
+              return { recordset: [{ count: values.get('userId') === userId ? 1 : 0 }] };
+            }
+            return { recordset: [] };
+          }),
+        };
+        return (await handler(request)).recordset;
+      }),
+    };
+    const service = new AuthService(database as never, {} as never);
+
+    await expect(service.changeAdminPassword(otherUserId, {
+      resetSessionId,
+      password: 'NewPassword1',
+      confirmPassword: 'NewPassword1',
+    })).rejects.toThrow('password-change session has expired');
+  });
+});

@@ -29,9 +29,9 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
     await this.ensureProductCreatedAtPhilippineTime();
     await this.ensureMessageReadAtColumn();
     await this.ensureConversationViewColumns();
+    await this.ensureAdminUsernameColumn();
     await this.ensureVoucherSchema();
     await this.ensureBotUser();
-    await this.ensureAdminUser();
   }
 
   async getPool() {
@@ -96,32 +96,21 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
     return Number(rows[0]?.count ?? 0) > 0;
   }
 
-  private async ensureAdminUser() {
+  private async ensureAdminUsernameColumn() {
     if (!(await this.tableExists('USERS'))) {
       return;
     }
 
-    await this.request((request) =>
-      request
-        .input('email', sql.NVarChar(255), 'admin@swag.com')
-        .input('password', sql.NVarChar(255), process.env.ADMIN_PASSWORD ?? 'admin123')
-        .input('fullName', sql.NVarChar(150), 'Admin User').query(`
-          IF EXISTS (SELECT 1 FROM USERS WHERE email = @email)
-          BEGIN
-            UPDATE USERS
-            SET
-              password_hash = @password,
-              is_admin = 1,
-              is_active = 1
-            WHERE email = @email;
-          END
-          ELSE
-          BEGIN
-            INSERT INTO USERS (email, password_hash, full_name, is_admin, is_active)
-            VALUES (@email, @password, @fullName, 1, 1);
-          END
-        `),
-    );
+    if (!(await this.columnExists('USERS', 'admin_username'))) {
+      await this.query(`ALTER TABLE dbo.USERS ADD admin_username NVARCHAR(64) NULL`);
+    }
+    const indexExists = await this.request<{ count: number }>((request) => request.query(`
+      SELECT COUNT(*) AS count FROM sys.indexes
+      WHERE name = 'UX_USERS_ADMIN_USERNAME' AND object_id = OBJECT_ID('dbo.USERS')
+    `));
+    if (!Number(indexExists[0]?.count)) {
+      await this.query(`CREATE UNIQUE INDEX UX_USERS_ADMIN_USERNAME ON dbo.USERS (admin_username) WHERE admin_username IS NOT NULL`);
+    }
   }
 
   private async ensureBaseLookups() {

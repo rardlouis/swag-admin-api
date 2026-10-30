@@ -3,6 +3,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import { diskStorage } from 'multer';
 import { extname } from 'path';
 import { AdminService } from './admin.service';
+import { AuthService } from '../auth/auth.service';
 import { AdminGuard, type SessionIdentity } from '../common/session-auth';
 import { Res, StreamableFile, Query } from '@nestjs/common';
 import type { Response } from 'express';
@@ -16,7 +17,7 @@ type UploadedProfileFile = {
 @Controller('admin')
 @UseGuards(AdminGuard)
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(private readonly adminService: AdminService, private readonly authService: AuthService) {}
 
   @Get('dashboard')
   dashboard() {
@@ -149,13 +150,32 @@ export class AdminController {
   }
 
   @Patch('profile/:id')
-  updateProfile(@Param('id') id: string, @Body() body: unknown) {
-    return this.adminService.updateProfile(id, body);
+  updateProfile(@Param('id') id: string, @Body() body: unknown, @Req() request: { user: SessionIdentity }) {
+    // The URL is kept for compatibility, but the session identity is the
+    // source of truth. A stale or tampered browser-stored ID cannot update a
+    // different administrator.
+    void id;
+    return this.adminService.updateProfile(request.user.sub, body);
+  }
+
+  @Get('profile/me')
+  profile(@Req() request: { user: SessionIdentity }) {
+    return this.adminService.profile(request.user.sub);
+  }
+
+  @Post('password/change/send')
+  sendChangePasswordOtp(@Body() body: { currentPassword?: string }, @Req() request: { user: SessionIdentity }) {
+    return this.authService.sendAdminChangePasswordOtp(request.user.sub, body.currentPassword);
+  }
+
+  @Post('password/change/verify')
+  verifyChangePasswordOtp(@Body() body: { code?: string }, @Req() request: { user: SessionIdentity }) {
+    return this.authService.verifyAdminChangePasswordOtp(request.user.sub, body.code);
   }
 
   @Post('password/change')
-  changePassword(@Body() body: { currentPassword?: string; password?: string; confirmPassword?: string }, @Req() request: { user: SessionIdentity }) {
-    return this.adminService.changePassword(request.user.sub, body);
+  changePassword(@Body() body: { resetSessionId?: string; password?: string; confirmPassword?: string }, @Req() request: { user: SessionIdentity }) {
+    return this.authService.changeAdminPassword(request.user.sub, body);
   }
 
   @Post('profile/:id/photo')
