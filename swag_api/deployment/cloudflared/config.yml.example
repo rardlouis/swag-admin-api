@@ -1,0 +1,9 @@
+# Copy this file outside the repository, for example to %USERPROFILE%\.cloudflared\config.yml.
+# Create the named tunnel and its credentials with cloudflared separately; never commit credentials.
+tunnel: REPLACE_WITH_TUNNEL_NAME_OR_ID
+credentials-file: C:\Users\REPLACE_WITH_WINDOWS_USER\.cloudflared\REPLACE_WITH_TUNNEL_ID.json
+
+ingress:
+  - hostname: api.adminafrodrygoods.shop
+    service: http://127.0.0.1:5000
+  - service: http_status:404
