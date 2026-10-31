@@ -14,6 +14,7 @@ import {
 } from "react-icons/md";
 import { apiDelete, apiGet, apiDownload } from "../../api.js";
 import "./Suppliers.css";
+import { ServerUnavailableNotice } from '../../components/ServerUnavailableNotice.jsx';
 
 export default function Suppliers() {
   const navigate = useNavigate();
@@ -124,9 +125,9 @@ export default function Suppliers() {
         </div>
 
         {(loading || error) && (
-          <p className={error ? "suppliers-status error" : "suppliers-status"}>
-            {error || "Loading suppliers..."}
-          </p>
+          <><p className={error ? "suppliers-status error" : "suppliers-status"}>
+              {error || "Loading suppliers..."}
+            </p><ServerUnavailableNotice error={{ message: error }} onRetry={loadSuppliers} disabled={loading} /></>
         )}
 
         <table className="suppliers-table">

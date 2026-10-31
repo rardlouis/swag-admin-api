@@ -14,6 +14,7 @@ import {
   MdUnfoldMore,
 } from "react-icons/md";
 import "./Customers.css";
+import { ServerUnavailableNotice } from '../../components/ServerUnavailableNotice.jsx';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 30];
 
@@ -41,11 +42,17 @@ export default function Customer() {
   const [isLoading, setIsLoading]   = useState(true);
   const [error, setError]           = useState("");
 
-  useEffect(() => {
+  const loadCustomers = () => {
+    setIsLoading(true);
+    setError("");
     apiGet("/admin/customers")
       .then(setCustomers)
       .catch((err) => setError(err.message))
       .finally(() => setIsLoading(false));
+  };
+
+  useEffect(() => {
+    loadCustomers();
   }, []);
 
   const filtered = customers.filter(
@@ -112,7 +119,7 @@ export default function Customer() {
       {/* Table */}
       <div className="customers-table-wrap">
         {isLoading && <p className="table-state">Loading customers...</p>}
-        {error && <p className="table-state table-state--error">{error}</p>}
+        {error && <><p className="table-state table-state--error">{error}</p><ServerUnavailableNotice error={{ message: error }} onRetry={loadCustomers} disabled={isLoading} /></>}
 
         {!isLoading && !error && <table className="customers-table">
           <thead>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { MdAdd, MdDelete, MdEdit, MdSearch } from "react-icons/md";
 import { apiDelete, apiGet, apiPatch, apiPost, formatPeso } from "../../api.js";
+import { ServerUnavailableNotice } from '../../components/ServerUnavailableNotice.jsx';
 import "./Vouchers.css";
 
 const blankVoucher = () => ({ code: "", discountType: "percentage", discountAmount: "", minimumOrderAmount: "0", usageLimit: "", startAt: new Date().toISOString().slice(0, 16), endAt: "", isActive: true });
@@ -31,7 +32,7 @@ export default function Vouchers() {
     <div className="vouchers-header"><div><h1>Voucher Management</h1><p>Dashboard <span>›</span> <strong>Vouchers</strong></p></div><button className="voucher-primary" onClick={openNew}><MdAdd /> Create voucher</button></div>
     <div className="vouchers-card">
       <div className="voucher-toolbar"><div className="voucher-search"><MdSearch /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search voucher code" /></div></div>
-      {error && !editing && <p className="voucher-error">{error}</p>}
+      {error && !editing && <><p className="voucher-error">{error}</p><ServerUnavailableNotice error={{ message: error }} onRetry={load} disabled={loading} /></>}
       {loading ? <p className="voucher-note">Loading vouchers…</p> : <table><thead><tr><th>Code</th><th>Discount</th><th>Minimum order</th><th>Usage</th><th>Schedule</th><th>Status</th><th>Actions</th></tr></thead><tbody>
         {filtered.map((voucher) => <tr key={voucher.id}><td><b>{voucher.code}</b></td><td>{voucher.discountType === "percentage" ? `${voucher.discountAmount}% OFF` : `${formatPeso(voucher.discountAmount)} OFF`}</td><td>{formatPeso(voucher.minimumOrderAmount)}</td><td>{voucher.usageCount}{voucher.usageLimit === null ? " / ∞" : ` / ${voucher.usageLimit}`}</td><td>{new Date(voucher.startAt).toLocaleDateString("en-PH")} – {voucher.endAt ? new Date(voucher.endAt).toLocaleDateString("en-PH") : "No end date"}</td><td><span className={`voucher-badge ${voucher.status.toLowerCase()}`}>{voucher.status}</span></td><td className="voucher-actions"><button onClick={() => toggle(voucher)}>{voucher.isActive ? "Deactivate" : "Activate"}</button><button title="Edit" onClick={() => openEdit(voucher)}><MdEdit /></button><button title="Delete" onClick={() => remove(voucher)}><MdDelete /></button></td></tr>)}
         {!filtered.length && <tr><td colSpan="7" className="voucher-empty">No vouchers found.</td></tr>}

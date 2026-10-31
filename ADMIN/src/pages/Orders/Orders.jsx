@@ -7,6 +7,7 @@ import {
   MdChevronLeft, MdChevronRight,
 } from "react-icons/md";
 import "./Orders.css";
+import { ServerUnavailableNotice } from '../../components/ServerUnavailableNotice.jsx';
 
 const TABS = ["All Orders", "Shipping", "Completed", "Cancel"];
 const ORDER_STATUSES = ["Order Placed", "Payment Confirmed", "Order Confirmed", "Order Processed", "Ready to Ship", "In Transit", "Out for Delivery", "Delivered", "Cancelled"];
@@ -47,11 +48,17 @@ export default function Orders() {
   const [cancelOrder, setCancelOrder] = useState(null);
   const [cancellationReason, setCancellationReason] = useState('');
 
-  useEffect(() => {
+  const loadOrders = () => {
+    setIsLoading(true);
+    setError("");
     apiGet("/admin/orders")
       .then(setOrders)
       .catch((err) => setError(err.message))
       .finally(() => setIsLoading(false));
+  };
+
+  useEffect(() => {
+    loadOrders();
   }, []);
 
   const tabCounts = useMemo(() => ({
@@ -205,7 +212,7 @@ export default function Orders() {
 
         {/* Table */}
         {isLoading && <p className="table-state">Loading orders...</p>}
-        {error && <p className="table-state table-state--error">{error}</p>}
+        {error && <><p className="table-state table-state--error">{error}</p><ServerUnavailableNotice error={{ message: error }} onRetry={loadOrders} disabled={isLoading} /></>}
 
         {!isLoading && <table className="orders-table">
           <thead>

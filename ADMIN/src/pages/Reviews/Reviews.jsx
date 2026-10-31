@@ -13,6 +13,7 @@ import {
   MdVisibility,
 } from "react-icons/md";
 import "./Reviews.css";
+import { ServerUnavailableNotice } from '../../components/ServerUnavailableNotice.jsx';
 
 export default function Reviews() {
   const [isExporting, setIsExporting] = useState(false);
@@ -36,11 +37,17 @@ export default function Reviews() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => {
+  const loadReviews = () => {
+    setIsLoading(true);
+    setError("");
     apiGet("/admin/reviews")
       .then(setReviews)
       .catch((err) => setError(err.message))
       .finally(() => setIsLoading(false));
+  };
+
+  useEffect(() => {
+    loadReviews();
   }, []);
 
   const filtered = reviews.filter((review) =>
@@ -95,7 +102,7 @@ export default function Reviews() {
         </div>
 
         {isLoading && <p className="table-state">Loading reviews...</p>}
-        {error && <p className="table-state table-state--error">{error}</p>}
+        {error && <><p className="table-state table-state--error">{error}</p><ServerUnavailableNotice error={{ message: error }} onRetry={loadReviews} disabled={isLoading} /></>}
 
         {!isLoading && !error && <table className="reviews-table">
           <thead>

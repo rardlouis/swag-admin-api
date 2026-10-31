@@ -6,6 +6,18 @@ const API_BASE_URL = configuredApiUrl
   : "";
 const API_ORIGIN = API_BASE_URL.replace(/\/api$/, "");
 const REQUEST_TIMEOUT_MS = 15_000;
+export const SERVER_UNAVAILABLE_MESSAGE = "Server unavailable, please try again later.";
+
+export class ServerUnavailableError extends Error {
+  constructor() {
+    super(SERVER_UNAVAILABLE_MESSAGE);
+    this.name = "ServerUnavailableError";
+  }
+}
+
+export function isServerUnavailableError(error) {
+  return error instanceof ServerUnavailableError;
+}
 
 function clearInvalidAdminSession() {
   sessionStorage.removeItem("swag_admin_token");
@@ -15,6 +27,9 @@ function clearInvalidAdminSession() {
 }
 
 async function throwApiError(response, path) {
+  if ([502, 503, 504].includes(response.status)) {
+    throw new ServerUnavailableError();
+  }
   const error = await response.json().catch(() => null);
   const message = Array.isArray(error?.message)
     ? error.message.join(" ")
@@ -39,6 +54,7 @@ function authHeaders(headers = {}) {
 }
 
 async function fetchApi(path, options = {}) {
+  if (!API_BASE_URL) throw new ServerUnavailableError();
   try {
     return await fetch(`${API_BASE_URL}${path}`, {
       ...options,
@@ -46,9 +62,9 @@ async function fetchApi(path, options = {}) {
     });
   } catch (error) {
     if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-      throw new Error("The request timed out. Check your connection and try again.");
+      throw new ServerUnavailableError();
     }
-    throw new Error("We could not reach the server. Check your connection and try again.");
+    throw new ServerUnavailableError();
   }
 }
 
