@@ -1,6 +1,11 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:5000/api";
-const configuredTimeout = Number(import.meta.env.VITE_API_TIMEOUT_MS);
-const REQUEST_TIMEOUT_MS = Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 15_000;
+const configuredApiUrl = import.meta.env.VITE_API_URL?.trim().replace(/\/$/, "");
+const API_BASE_URL = configuredApiUrl
+  ? configuredApiUrl.endsWith("/api")
+    ? configuredApiUrl
+    : `${configuredApiUrl}/api`
+  : "";
+const API_ORIGIN = API_BASE_URL.replace(/\/api$/, "");
+const REQUEST_TIMEOUT_MS = 15_000;
 
 function clearInvalidAdminSession() {
   sessionStorage.removeItem("swag_admin_token");
@@ -159,8 +164,11 @@ export function formatDate(value, options = {}) {
 
 export function imageUrl(url) {
   if (!url) return "";
-  if (/^https?:\/\//i.test(url)) return url.replace("http://localhost:5000", API_BASE_URL.replace("/api", ""));
-  return `${API_BASE_URL.replace("/api", "")}${url.startsWith("/") ? url : `/${url}`}`;
+  if (/^https?:\/\//i.test(url)) {
+    const parsed = new URL(url);
+    return `${API_ORIGIN}${parsed.pathname}${parsed.search}${parsed.hash}`;
+  }
+  return `${API_ORIGIN}${url.startsWith("/") ? url : `/${url}`}`;
 }
 
 export async function apiDownload(path, filename) {
