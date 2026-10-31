@@ -19,4 +19,10 @@ describe('AppController', () => {
       expect(appController.getHello()).toBe('SWAG API is running');
     });
   });
+
+  describe('health', () => {
+    it('returns an operational status without database details', () => {
+      expect(appController.health()).toEqual({ status: 'ok' });
+    });
+  });
 });

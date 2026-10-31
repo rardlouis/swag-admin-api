@@ -3,6 +3,8 @@ import { AppModule } from './app.module';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { existsSync, mkdirSync, readFileSync } from 'fs';
+import { SafeExceptionFilter } from './common/safe-exception.filter';
+import { authRateLimit } from './common/auth-rate-limit.middleware';
 
 function loadEnvFile() {
   const candidates = [
@@ -39,10 +41,16 @@ async function bootstrap() {
   mkdirSync(join(process.cwd(), 'uploads', 'reviews'), { recursive: true });
   mkdirSync(join(process.cwd(), 'uploads', 'messages'), { recursive: true });
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  app.set('trust proxy', 1);
   app.enableCors({
-    origin: true,
+    origin: [
+      'https://adminafrodrygoods.shop',
+      'http://localhost:5173',
+    ],
     credentials: true,
   });
+  app.use(authRateLimit);
+  app.useGlobalFilters(new SafeExceptionFilter());
   app.useStaticAssets(join(process.cwd(), 'uploads'), {
     prefix: '/uploads/',
   });
@@ -54,9 +62,7 @@ async function bootstrap() {
   await app.listen(process.env.PORT ?? 5000, process.env.HOST ?? '0.0.0.0');
 }
 bootstrap().catch((error: unknown) => {
-  // Preserve the actual startup failure (database/migration/bind error) rather
-  // than leaving the frontend with only a generic connection failure.
-  const detail = error instanceof Error ? error.stack ?? error.message : String(error);
-  console.error(`API startup failed: ${detail}`);
+  void error;
+  console.error('API startup failed. Check the server logs and environment configuration.');
   process.exitCode = 1;
 });

@@ -12,9 +12,10 @@ import { ChatModule } from './chat/chat.module';
 import { TryonModule } from './tryon/tryon.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { SkinToneModule } from './skin-tone/skin-tone.module';
 
 @Module({
-  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule, CartModule, SavedModule, ProfileModule, ChatModule, TryonModule, ReviewsModule, NotificationsModule],
+  imports: [ProductsModule, DatabaseModule, AdminModule, AuthModule, CartModule, SavedModule, ProfileModule, ChatModule, TryonModule, ReviewsModule, NotificationsModule, SkinToneModule],
   controllers: [AppController],
   providers: [AppService],
 })
