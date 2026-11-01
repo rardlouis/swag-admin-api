@@ -45,6 +45,7 @@ async function bootstrap() {
   app.enableCors({
     origin: [
       'https://adminafrodrygoods.shop',
+      'https://swag-admin-api.pages.dev',
       'http://localhost:5173',
     ],
     credentials: true,
