@@ -780,7 +780,7 @@ export class AuthService {
     const fashionStyles = await this.validatedFashionStyles(payload.fashion_style);
     const audienceIds = await this.validatedStyleAudienceIds(payload.audienceIds, true);
     const styleLabel = fashionStyles[0] ?? null;
-    const genderId = await this.findGenderId(payload.gender);
+    const genderId = await this.findCustomerGenderId(payload.gender);
     const preferredSizeLabel = payload.preferred_size?.trim() || null;
     const idTypeLabel = this.normalizeIdType(payload.id_type);
     const skinHex = this.normalizeSkinHex(payload.skin_hex);
@@ -1006,7 +1006,7 @@ export class AuthService {
       .filter(Boolean)
       .join(', ') || null;
     const streetLine = [addressHouseNo, addressStreet].filter(Boolean).join(', ') || shippingAddress;
-    const genderId = await this.findGenderId(payload.gender);
+    const genderId = await this.findCustomerGenderId(payload.gender);
 
     if (!userId?.trim()) {
       throw new BadRequestException('User id is required');
@@ -1457,7 +1457,7 @@ export class AuthService {
     return normalized as string[];
   }
 
-  private async findGenderId(value?: string | null) {
+  private async findCustomerGenderId(value?: string | null) {
     const label = value?.trim();
     if (!label) return null;
 
@@ -1466,6 +1466,7 @@ export class AuthService {
         SELECT TOP 1 gender_id AS genderId
         FROM GENDERS
         WHERE LOWER(label) = LOWER(@label)
+          AND LOWER(label) IN ('male', 'female', 'non-binary', 'prefer not to say')
       `),
     );
     if (!rows[0]?.genderId) {

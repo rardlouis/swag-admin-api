@@ -175,7 +175,129 @@ export class AdminService {
     return rows.map((row, index) => ({ ...row, rank: index + 1 }));
   }
 
-  async salesReport() {
+  async salesReport(yearValue?: string | number, monthValue?: string | number) {
+    const period = this.salesReportPeriod(yearValue, monthValue);
+    const qualified = `
+      o.placed_at >= CONVERT(datetime2, @startDate, 23)
+      AND o.placed_at < CONVERT(datetime2, @endDate, 23)
+      AND LOWER(ISNULL(os.label, '')) NOT LIKE '%cancel%'
+      AND (LOWER(ISNULL(o.payment_status, '')) IN ('verified', 'paid')
+        OR LOWER(ISNULL(os.label, '')) LIKE '%deliver%'
+        OR LOWER(ISNULL(os.label, '')) LIKE '%complete%')`;
+    const query = <T = unknown>(statement: string) => this.salesReportQuery<T>(period, statement);
+
+    const [summary, salesBreakdown, transactionBreakdown, transactions, topProducts] = await Promise.all([
+      query(`
+        SELECT CAST(ISNULL(SUM(o.total_amount), 0) AS float) AS totalSales,
+          COUNT(DISTINCT o.user_id) AS totalCustomers, COUNT(*) AS totalTransactions,
+          COUNT(DISTINCT oi.product_id) AS totalProducts
+        FROM ORDERS o INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        LEFT JOIN ORDER_ITEMS oi ON oi.order_id = o.order_id
+        WHERE ${qualified}
+      `),
+      period.mode === 'annual'
+        ? query(`
+            WITH months AS (SELECT * FROM (VALUES
+              (1, 'Jan'), (2, 'Feb'), (3, 'Mar'), (4, 'Apr'), (5, 'May'), (6, 'Jun'),
+              (7, 'Jul'), (8, 'Aug'), (9, 'Sep'), (10, 'Oct'), (11, 'Nov'), (12, 'Dec')
+            ) AS valuesTable(monthNumber, label))
+            SELECT m.label, m.monthNumber AS sortOrder,
+              CAST(ISNULL(SUM(CASE WHEN o.placed_at >= CONVERT(datetime2, @startDate, 23) AND o.placed_at < CONVERT(datetime2, @endDate, 23) THEN o.total_amount ELSE 0 END), 0) AS float) AS sales,
+              CAST(ISNULL(SUM(CASE WHEN o.placed_at >= CONVERT(datetime2, @previousStartDate, 23) AND o.placed_at < CONVERT(datetime2, @previousEndDate, 23) THEN o.total_amount ELSE 0 END), 0) AS float) AS previous
+            FROM months m
+            LEFT JOIN ORDERS o ON MONTH(o.placed_at) = m.monthNumber
+            LEFT JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+            WHERE o.order_id IS NULL OR (
+              LOWER(ISNULL(os.label, '')) NOT LIKE '%cancel%'
+              AND (LOWER(ISNULL(o.payment_status, '')) IN ('verified', 'paid') OR LOWER(ISNULL(os.label, '')) LIKE '%deliver%' OR LOWER(ISNULL(os.label, '')) LIKE '%complete%')
+              AND ((o.placed_at >= CONVERT(datetime2, @startDate, 23) AND o.placed_at < CONVERT(datetime2, @endDate, 23))
+                OR (o.placed_at >= CONVERT(datetime2, @previousStartDate, 23) AND o.placed_at < CONVERT(datetime2, @previousEndDate, 23)))
+            )
+            GROUP BY m.label, m.monthNumber ORDER BY m.monthNumber
+          `)
+        : query(`
+            SELECT CONVERT(varchar(10), o.placed_at, 23) AS label, DAY(o.placed_at) AS sortOrder,
+              CAST(SUM(o.total_amount) AS float) AS sales, CAST(0 AS float) AS previous
+            FROM ORDERS o INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+            WHERE ${qualified}
+            GROUP BY CONVERT(varchar(10), o.placed_at, 23), DAY(o.placed_at) ORDER BY DAY(o.placed_at)
+          `),
+      period.mode === 'annual'
+        ? query(`
+            WITH months AS (SELECT * FROM (VALUES
+              (1, 'Jan'), (2, 'Feb'), (3, 'Mar'), (4, 'Apr'), (5, 'May'), (6, 'Jun'),
+              (7, 'Jul'), (8, 'Aug'), (9, 'Sep'), (10, 'Oct'), (11, 'Nov'), (12, 'Dec')
+            ) AS valuesTable(monthNumber, label))
+            SELECT m.label, m.monthNumber AS sortOrder, COUNT(o.order_id) AS transactions
+            FROM months m
+            LEFT JOIN ORDERS o ON MONTH(o.placed_at) = m.monthNumber
+              AND o.placed_at >= CONVERT(datetime2, @startDate, 23) AND o.placed_at < CONVERT(datetime2, @endDate, 23)
+            LEFT JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+            WHERE o.order_id IS NULL OR (${qualified})
+            GROUP BY m.label, m.monthNumber ORDER BY m.monthNumber
+          `)
+        : query(`
+            SELECT CONVERT(varchar(10), o.placed_at, 23) AS label, DAY(o.placed_at) AS sortOrder, COUNT(*) AS transactions
+            FROM ORDERS o INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+            WHERE ${qualified}
+            GROUP BY CONVERT(varchar(10), o.placed_at, 23), DAY(o.placed_at) ORDER BY DAY(o.placed_at)
+          `),
+      query(`
+        SELECT CONVERT(varchar(36), o.order_id) AS id, COALESCE(u.full_name, 'Customer') AS client,
+          COALESCE(firstItem.name, 'Order') AS product, CAST(o.total_amount AS float) AS amount,
+          LOWER(REPLACE(os.label, ' ', '-')) AS status, o.placed_at AS placedAt
+        FROM ORDERS o INNER JOIN USERS u ON u.user_id = o.user_id
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id
+        OUTER APPLY (SELECT TOP 1 p.name FROM ORDER_ITEMS oi INNER JOIN PRODUCTS p ON p.product_id = oi.product_id WHERE oi.order_id = o.order_id ORDER BY oi.order_item_id) firstItem
+        WHERE ${qualified} ORDER BY o.placed_at DESC
+      `),
+      query(`
+        SELECT TOP 5 p.name, CAST(SUM(oi.quantity) AS int) AS sold, CAST(SUM(oi.quantity * oi.unit_price) AS float) AS revenue
+        FROM ORDER_ITEMS oi INNER JOIN ORDERS o ON o.order_id = oi.order_id
+        INNER JOIN ORDER_STATUSES os ON os.status_id = o.status_id INNER JOIN PRODUCTS p ON p.product_id = oi.product_id
+        WHERE ${qualified} GROUP BY p.product_id, p.name
+        ORDER BY SUM(oi.quantity) DESC, SUM(oi.quantity * oi.unit_price) DESC
+      `),
+    ]);
+
+    return {
+      period,
+      summary: summary[0] ?? { totalSales: 0, totalCustomers: 0, totalTransactions: 0, totalProducts: 0 },
+      salesBreakdown,
+      transactionBreakdown,
+      monthlySales: salesBreakdown,
+      monthlyTransactions: transactionBreakdown,
+      transactions,
+      recentTransactions: transactions.slice(0, 7),
+      topProducts,
+    };
+  }
+
+  private salesReportPeriod(yearValue?: string | number, monthValue?: string | number) {
+    const currentYear = new Date().getFullYear();
+    const year = Number(yearValue ?? currentYear);
+    const month = monthValue === undefined || monthValue === '' ? null : Number(monthValue);
+    if (!Number.isInteger(year) || year < 2000 || year > currentYear + 1) throw new BadRequestException('Select a valid report year');
+    if (month !== null && (!Number.isInteger(month) || month < 1 || month > 12)) throw new BadRequestException('Select a valid report month');
+    const mode = month === null ? 'annual' : 'monthly';
+    const start = new Date(Date.UTC(year, month === null ? 0 : month - 1, 1));
+    const end = new Date(Date.UTC(year, month === null ? 12 : month, 1));
+    const previousStart = mode === 'annual' ? new Date(Date.UTC(year - 1, 0, 1)) : new Date(Date.UTC(year, (month as number) - 2, 1));
+    const iso = (date: Date) => date.toISOString().slice(0, 10);
+    const label = mode === 'annual' ? `Annual report for ${year}` : new Intl.DateTimeFormat('en', { month: 'long', year: 'numeric', timeZone: 'UTC' }).format(start);
+    return { mode, year, month, label, startDate: iso(start), endDate: iso(end), previousStartDate: iso(previousStart), previousEndDate: iso(start) };
+  }
+
+  private salesReportQuery<T>(period: { startDate: string; endDate: string; previousStartDate: string; previousEndDate: string }, statement: string) {
+    return this.databaseService.request<T>((request) => request
+      .input('startDate', sql.NVarChar(10), period.startDate)
+      .input('endDate', sql.NVarChar(10), period.endDate)
+      .input('previousStartDate', sql.NVarChar(10), period.previousStartDate)
+      .input('previousEndDate', sql.NVarChar(10), period.previousEndDate)
+      .query(statement));
+  }
+
+  private async legacySalesReport() {
     const [summary, monthlySales, monthlyTransactions, recentTransactions, topProducts] = await Promise.all([
       this.databaseService.query(`
         SELECT
@@ -785,7 +907,7 @@ export class AdminService {
         seller.full_name AS sellerName,
         latest.body AS lastMsg,
         COALESCE(latest.sent_at, c.last_message_at) AS time,
-        COUNT(CASE WHEN m.is_read = 0 AND m.sender_id = c.buyer_id THEN 1 END) AS unread,
+        COALESCE(unreadMessages.unread, 0) AS unread,
         CASE WHEN seller.is_bot = 1 THEN 'ai' ELSE 'human' END AS mode,
         seller.is_bot AS isAi,
         p.name AS productName,
@@ -802,14 +924,19 @@ export class AdminService {
         ORDER BY sent_at DESC
       ) latest
       OUTER APPLY (
+        SELECT COUNT(*) AS unread
+        FROM MESSAGES
+        WHERE convo_id = c.convo_id
+          AND is_read = 0
+          AND sender_id = c.buyer_id
+      ) unreadMessages
+      OUTER APPLY (
         SELECT TOP 1 image_url
         FROM PRODUCT_IMAGES
         WHERE product_id = p.product_id
         ORDER BY is_primary DESC, display_order ASC
       ) pi
-      LEFT JOIN MESSAGES m ON m.convo_id = c.convo_id
       WHERE c.is_active = 1 AND c.seller_deleted_at IS NULL
-      GROUP BY c.convo_id, c.buyer_id, c.seller_id, buyer.full_name, seller.full_name, seller.is_bot, p.name, p.price, pi.image_url, latest.body, latest.sent_at, c.last_message_at
       ORDER BY COALESCE(latest.sent_at, c.last_message_at) DESC
     `);
 
@@ -1583,21 +1710,25 @@ export class AdminService {
     return this.exportExcelBuffer(columns, rows, 'Suppliers');
   }
 
-  async exportSalesReport() {
-    const report = await this.salesReport();
+  async exportSalesReport(yearValue?: string | number, monthValue?: string | number) {
+    const report = await this.salesReport(yearValue, monthValue);
     const wb = XLSX.utils.book_new();
     
-    const summaryCols = ['Total Sales', 'Total Customers', 'Total Transactions', 'Total Products'];
-    const summaryRows = [[(report.summary as any).totalSales, (report.summary as any).totalCustomers, (report.summary as any).totalTransactions, (report.summary as any).totalProducts]];
+    const summaryCols = ['Report', 'Start Date', 'End Date', 'Total Sales', 'Customers', 'Transactions', 'Products Sold'];
+    const summaryRows = [[(report.period as any).label, (report.period as any).startDate, (report.period as any).endDate, (report.summary as any).totalSales, (report.summary as any).totalCustomers, (report.summary as any).totalTransactions, (report.summary as any).totalProducts]];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([summaryCols, ...summaryRows]), 'Summary');
 
-    const monthlyCols = ['Month', 'Sales', 'Previous Year'];
-    const monthlyRows = report.monthlySales.map((m: any) => [m.month, m.sales, m.previous]);
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([monthlyCols, ...monthlyRows]), 'Monthly Sales');
+    const salesCols = [(report.period as any).mode === 'annual' ? 'Month' : 'Date', 'Sales', 'Previous Period'];
+    const salesRows = report.salesBreakdown.map((item: any) => [item.label, item.sales, item.previous]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([salesCols, ...salesRows]), 'Sales Breakdown');
+
+    const transactionBreakdownCols = [(report.period as any).mode === 'annual' ? 'Month' : 'Date', 'Transactions'];
+    const transactionBreakdownRows = report.transactionBreakdown.map((item: any) => [item.label, item.transactions]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([transactionBreakdownCols, ...transactionBreakdownRows]), 'Transaction Breakdown');
 
     const txnCols = ['ID', 'Client', 'Product', 'Amount', 'Status', 'Date'];
-    const txnRows = report.recentTransactions.map((t: any) => [t.id, t.client, t.product, t.amount, t.status, t.placedAt]);
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([txnCols, ...txnRows]), 'Recent Transactions');
+    const txnRows = report.transactions.map((t: any) => [t.id, t.client, t.product, t.amount, t.status, t.placedAt]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([txnCols, ...txnRows]), 'Transactions');
 
     const topCols = ['Product', 'Units Sold', 'Revenue'];
     const topRows = report.topProducts.map((p: any) => [p.name, p.sold, p.revenue]);

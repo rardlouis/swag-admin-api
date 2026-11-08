@@ -20,6 +20,8 @@ const emptyForm = {
   customStyle: "",
   categoryId: "",
   genderId: "",
+  legacyGenderId: null,
+  legacyGenderLabel: "",
   audienceIds: [],
   sizeId: "",
   garmentTypeId: "",
@@ -35,7 +37,22 @@ const emptyForm = {
   isActive: true,
 };
 
-function productToForm(product) {
+const PRODUCT_GENDER_LABELS = ["Male", "Female", "Men", "Women", "Non-binary", "Unisex"];
+const PRODUCT_AUDIENCE_LABELS = ["Masculine", "Feminine", "Unisex"];
+
+function productGenderOptions(lookups) {
+  const byLabel = new Map((lookups.productGenders ?? []).map((gender) => [String(gender.label).toLowerCase(), gender]));
+  return PRODUCT_GENDER_LABELS.map((label) => byLabel.get(label.toLowerCase())).filter(Boolean);
+}
+
+function productAudienceOptions(lookups) {
+  const byLabel = new Map((lookups.productAudiences ?? []).map((audience) => [String(audience.label).toLowerCase(), audience]));
+  return PRODUCT_AUDIENCE_LABELS.map((label) => byLabel.get(label.toLowerCase())).filter(Boolean);
+}
+
+function productToForm(product, productGenders = []) {
+  const currentGenderLabel = String(product?.gender ?? "").trim();
+  const mappedGender = productGenders.find((gender) => String(gender.label).toLowerCase() === currentGenderLabel.toLowerCase());
   return {
     name: product?.name ?? "",
     description: product?.description ?? "",
@@ -43,7 +60,9 @@ function productToForm(product) {
     styleId: product?.styleId ? String(product.styleId) : "",
     customStyle: "",
     categoryId: product?.categoryId ? String(product.categoryId) : "",
-    genderId: product?.genderId ? String(product.genderId) : "",
+    genderId: mappedGender ? String(mappedGender.id) : "",
+    legacyGenderId: product?.genderId && !mappedGender ? Number(product.genderId) : null,
+    legacyGenderLabel: product?.genderId && !mappedGender ? currentGenderLabel : "",
     audienceIds: String(product?.audienceIds ?? "").split(",").map(Number).filter(Number.isFinite),
     sizeId: product?.sizeId ? String(product.sizeId) : "",
     garmentTypeId: product?.garmentTypeId ? String(product.garmentTypeId) : "",
@@ -73,7 +92,7 @@ export default function ProductsEdit() {
     categories: [],
     sizes: [],
     garmentTypes: [],
-    genders: [],
+    productGenders: [],
     colors: [],
     fashionStyles: [],
     styleAudiences: [],
@@ -83,11 +102,13 @@ export default function ProductsEdit() {
   const [isSaving, setIsSaving] = useState(false);
   const [uploadingImageCount, setUploadingImageCount] = useState(0);
   const isUploadingImages = uploadingImageCount > 0;
+  const genders = productGenderOptions(lookups);
+  const audiences = productAudienceOptions(lookups);
 
   useEffect(() => {
     Promise.all([apiGet(`/products/${id}`), apiGet("/products/meta/lookups")])
       .then(([product, lookupData]) => {
-        const nextForm = productToForm(product);
+        const nextForm = productToForm(product, lookupData.productGenders ?? []);
         setForm(nextForm);
         setSavedForm(nextForm);
         setLookups(lookupData);
@@ -238,7 +259,7 @@ export default function ProductsEdit() {
     styleId: form.styleId ? Number(form.styleId) : null,
     customStyle: form.customStyle || null,
     categoryId: Number(form.categoryId),
-    genderId: form.genderId ? Number(form.genderId) : null,
+    genderId: form.genderId ? Number(form.genderId) : form.legacyGenderId,
     audienceIds: form.audienceIds.map(Number),
     sizeId: form.sizeId ? Number(form.sizeId) : null,
     garmentTypeId: form.garmentTypeId ? Number(form.garmentTypeId) : null,
@@ -349,13 +370,14 @@ export default function ProductsEdit() {
 
             <label className="product-add-field product-add-select">
               <span>Gender</span>
-              <select value={form.genderId} onChange={(e) => updateField("genderId", e.target.value)}>
-                <option value="">No gender</option>
-                {lookups.genders.map((gender) => (
+              <select value={form.genderId} onChange={(e) => setForm((prev) => ({ ...prev, genderId: e.target.value, legacyGenderId: null, legacyGenderLabel: "" }))}>
+                <option value="" disabled>Select product gender</option>
+                {genders.map((gender) => (
                   <option key={gender.id} value={gender.id}>{gender.label}</option>
                 ))}
               </select>
               <MdKeyboardArrowDown size={20} />
+              {form.legacyGenderLabel ? <small className="product-field-hint">Legacy value retained: {form.legacyGenderLabel}</small> : null}
             </label>
           </div>
 
@@ -363,7 +385,7 @@ export default function ProductsEdit() {
             <legend>Product Audiences</legend>
             <p>Choose every audience this item is suitable for.</p>
             <div className="product-audience-options">
-              {(lookups.styleAudiences ?? []).map((audience) => {
+              {audiences.map((audience) => {
                 const selected = form.audienceIds.includes(Number(audience.id));
                 return <label key={audience.id} className={selected ? "selected" : ""}><input type="checkbox" checked={selected} onChange={() => updateField("audienceIds", selected ? form.audienceIds.filter((audienceId) => audienceId !== Number(audience.id)) : [...form.audienceIds, Number(audience.id)])} />{audience.label}</label>;
               })}

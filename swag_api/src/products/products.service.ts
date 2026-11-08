@@ -247,7 +247,26 @@ export class ProductsService {
           label: category.name,
         }));
 
-    return { categories, sizes, garmentTypes, genders, palettes, colors, colorFamilies, fashionStyles, styleAudiences };
+    // Derive both scoped collections from the one established GENDERS query.
+    // This avoids a second lookup becoming a point of failure on older deployed
+    // SQL Server instances while leaving the legacy `genders` response intact.
+    const genderRows = genders as Array<{ id: number; label: string }>;
+    const genderByLabel = new Map(genderRows.map((gender) => [gender.label.toLowerCase(), gender]));
+    const customerGenders = ['male', 'female', 'non-binary', 'prefer not to say']
+      .map((label) => genderByLabel.get(label))
+      .filter((gender): gender is { id: number; label: string } => Boolean(gender));
+    const productGenders = ['male', 'female', 'men', 'women', 'non-binary', 'unisex']
+      .map((label) => genderByLabel.get(label))
+      .filter((gender): gender is { id: number; label: string } => Boolean(gender));
+    const audienceRows = styleAudiences as Array<{ id: number; label: string }>;
+    const audienceByLabel = new Map(audienceRows.map((audience) => [audience.label.toLowerCase(), audience]));
+    const productAudiences = ['masculine', 'feminine', 'unisex']
+      .map((label) => audienceByLabel.get(label))
+      .filter((audience): audience is { id: number; label: string } => Boolean(audience));
+
+    // `genders` remains unchanged for existing clients. The scoped collections
+    // prevent product merchandising labels from leaking into customer profiles.
+    return { categories, sizes, garmentTypes, genders, customerGenders, productGenders, productAudiences, palettes, colors, colorFamilies, fashionStyles, styleAudiences };
   }
 
   async measurementDefaults(sizeId: number, garmentTypeId: number) {
@@ -492,7 +511,9 @@ export class ProductsService {
   async update(id: string, updateProductDto: UpdateProductDto) {
     await this.ensureProductStyleColumn();
     await this.databaseService.ensureStyleAudienceSchema();
-    await this.validateProduct(updateProductDto);
+    const existingGenderId = await this.productGenderId(id);
+    const existingAudienceIds = await this.productAudienceIds(id);
+    await this.validateProduct(updateProductDto, existingGenderId, existingAudienceIds);
     await this.validateCategoryGarmentType(updateProductDto);
     const quantity = Number(updateProductDto.quantity ?? 0);
     const styleId = await this.resolveProductStyle(updateProductDto.styleId, updateProductDto.customStyle);
@@ -561,7 +582,7 @@ export class ProductsService {
     }
 
     await this.saveProductImages(id, this.getImageUrls(updateProductDto));
-    if (updateProductDto.audienceIds !== undefined) await this.saveProductAudiences(id, updateProductDto.audienceIds);
+    if (updateProductDto.audienceIds !== undefined) await this.saveProductAudiences(id, updateProductDto.audienceIds, existingAudienceIds);
 
     await this.saveProductMeasurements(id, updateProductDto);
 
@@ -602,7 +623,7 @@ export class ProductsService {
     return styleId ? Number(styleId) : null;
   }
 
-  private async validateProduct(productDto: CreateProductDto | UpdateProductDto) {
+  private async validateProduct(productDto: CreateProductDto | UpdateProductDto, existingGenderId?: number | null, existingAudienceIds: number[] = []) {
     if (!productDto.name?.trim()) {
       throw new BadRequestException('Product name is required');
     }
@@ -634,11 +655,56 @@ export class ProductsService {
 
     this.toNullableShippingValue(productDto.weightKg);
     this.toNullableShippingValue(productDto.bulkUnits);
-    if (productDto.audienceIds !== undefined) await this.validateAudienceIds(productDto.audienceIds);
+    if (productDto.audienceIds !== undefined) await this.validateAudienceIds(productDto.audienceIds, existingAudienceIds);
+    await this.validateProductGenderId(productDto.genderId, existingGenderId);
   }
 
-  private async saveProductAudiences(productId: string, audienceIds: number[]) {
-    const values = await this.validateAudienceIds(audienceIds);
+  private async productGenderId(productId: string) {
+    const rows = await this.databaseService.request<{ genderId: number | null }>((request) =>
+      request.input('productId', sql.UniqueIdentifier, productId).query(`
+        SELECT gender_id AS genderId FROM PRODUCTS WHERE product_id = @productId
+      `),
+    );
+    return rows[0]?.genderId ?? null;
+  }
+
+  private async productAudienceIds(productId: string) {
+    const rows = await this.databaseService.request<{ audienceId: number }>((request) =>
+      request.input('productId', sql.UniqueIdentifier, productId).query(`
+        SELECT audience_id AS audienceId FROM PRODUCT_STYLE_AUDIENCES WHERE product_id = @productId
+      `),
+    );
+    return rows.map((row) => Number(row.audienceId));
+  }
+
+  private async validateProductGenderId(genderId?: number | null, existingGenderId?: number | null) {
+    if (genderId === undefined || genderId === null) return;
+
+    const numericGenderId = Number(genderId);
+    if (!Number.isInteger(numericGenderId)) {
+      throw new BadRequestException('Selected product gender is not valid');
+    }
+
+    // A legacy product can be edited without silently rewriting its old value.
+    if (existingGenderId !== null && existingGenderId !== undefined && numericGenderId === Number(existingGenderId)) {
+      return;
+    }
+
+    const rows = await this.databaseService.request<{ count: number }>((request) =>
+      request.input('genderId', sql.TinyInt, numericGenderId).query(`
+        SELECT COUNT(*) AS count
+        FROM GENDERS
+        WHERE gender_id = @genderId
+          AND LOWER(label) IN ('male', 'female', 'men', 'women', 'non-binary', 'unisex')
+      `),
+    );
+    if (!Number(rows[0]?.count)) {
+      throw new BadRequestException('Product gender must be Male, Female, Men, Women, Non-binary, or Unisex');
+    }
+  }
+
+  private async saveProductAudiences(productId: string, audienceIds: number[], existingAudienceIds: number[] = []) {
+    const values = await this.validateAudienceIds(audienceIds, existingAudienceIds);
     if (!values.length) return;
     await this.databaseService.request((request) => request.input('productId', sql.UniqueIdentifier, productId).query(`DELETE FROM PRODUCT_STYLE_AUDIENCES WHERE product_id = @productId`));
     for (const audienceId of values) {
@@ -646,13 +712,24 @@ export class ProductsService {
     }
   }
 
-  private async validateAudienceIds(value: unknown) {
+  private async validateAudienceIds(value: unknown, existingAudienceIds: number[] = []) {
     const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : [value];
     const values = [...new Set(raw.map((item) => Number(typeof item === 'object' && item !== null ? (item as { id?: unknown }).id : item)).filter((id) => Number.isInteger(id) && id > 0 && id <= 255))];
     if (!values.length) throw new BadRequestException('Select one or more valid product audiences.');
-    // PRODUCT_STYLE_AUDIENCES has a foreign key to STYLE_AUDIENCES. The
-    // database therefore remains the final authority, while this accepts the
-    // number/string payload variants produced by existing admin deployments.
+    if (values.length === existingAudienceIds.length && values.every((id) => existingAudienceIds.includes(id))) {
+      return values;
+    }
+    const matched = await this.databaseService.request<{ count: number }>((request) =>
+      request.input('audienceIds', sql.NVarChar(200), values.join(',')).query(`
+        SELECT COUNT(*) AS count
+        FROM STYLE_AUDIENCES
+        WHERE audience_id IN (SELECT TRY_CAST(value AS tinyint) FROM STRING_SPLIT(@audienceIds, ','))
+          AND LOWER(label) IN ('masculine', 'feminine', 'unisex')
+      `),
+    );
+    if (Number(matched[0]?.count) !== values.length) {
+      throw new BadRequestException('Product audiences must be Masculine, Feminine, or Unisex.');
+    }
     return values;
   }
 

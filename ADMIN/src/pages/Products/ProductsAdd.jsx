@@ -34,6 +34,19 @@ const initialForm = {
   isActive: true,
 };
 
+const PRODUCT_GENDER_LABELS = ["Male", "Female", "Men", "Women", "Non-binary", "Unisex"];
+const PRODUCT_AUDIENCE_LABELS = ["Masculine", "Feminine", "Unisex"];
+
+function productGenderOptions(lookups) {
+  const byLabel = new Map((lookups.productGenders ?? []).map((gender) => [String(gender.label).toLowerCase(), gender]));
+  return PRODUCT_GENDER_LABELS.map((label) => byLabel.get(label.toLowerCase())).filter(Boolean);
+}
+
+function productAudienceOptions(lookups) {
+  const byLabel = new Map((lookups.productAudiences ?? []).map((audience) => [String(audience.label).toLowerCase(), audience]));
+  return PRODUCT_AUDIENCE_LABELS.map((label) => byLabel.get(label.toLowerCase())).filter(Boolean);
+}
+
 export default function ProductsAdd() {
   const navigate = useNavigate();
   const [form, setForm] = useState(initialForm);
@@ -41,7 +54,7 @@ export default function ProductsAdd() {
     categories: [],
     sizes: [],
     garmentTypes: [],
-    genders: [],
+    productGenders: [],
     colors: [],
     fashionStyles: [],
     styleAudiences: [],
@@ -50,6 +63,8 @@ export default function ProductsAdd() {
   const [isSaving, setIsSaving] = useState(false);
   const [uploadingImageCount, setUploadingImageCount] = useState(0);
   const isUploadingImages = uploadingImageCount > 0;
+  const genders = productGenderOptions(lookups);
+  const audiences = productAudienceOptions(lookups);
 
   useEffect(() => {
     apiGet("/products/meta/lookups")
@@ -285,8 +300,8 @@ export default function ProductsAdd() {
             <label className="product-add-field product-add-select">
               <span>Gender</span>
               <select value={form.genderId} onChange={(e) => updateField("genderId", e.target.value)}>
-                <option value="">No gender</option>
-                {lookups.genders.map((gender) => (
+                <option value="" disabled>Select product gender</option>
+                {genders.map((gender) => (
                   <option key={gender.id} value={gender.id}>{gender.label}</option>
                 ))}
               </select>
@@ -298,7 +313,7 @@ export default function ProductsAdd() {
             <legend>Product Audiences</legend>
             <p>Choose every audience this item is suitable for.</p>
             <div className="product-audience-options">
-              {(lookups.styleAudiences ?? []).map((audience) => {
+              {audiences.map((audience) => {
                 const selected = form.audienceIds.includes(Number(audience.id));
                 return <label key={audience.id} className={selected ? "selected" : ""}><input type="checkbox" checked={selected} onChange={() => updateField("audienceIds", selected ? form.audienceIds.filter((id) => id !== Number(audience.id)) : [...form.audienceIds, Number(audience.id)])} />{audience.label}</label>;
               })}

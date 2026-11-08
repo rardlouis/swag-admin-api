@@ -1,6 +1,14 @@
 import { AdminController } from './admin.controller';
 
 describe('AdminController profile updates', () => {
+  it('forwards a selected monthly report range to the sales service', async () => {
+    const adminService = { salesReport: jest.fn().mockResolvedValue({ summary: {} }) };
+    const controller = new AdminController(adminService as never, {} as never);
+
+    await expect(controller.salesReport('2026', '4')).resolves.toEqual({ summary: {} });
+    expect(adminService.salesReport).toHaveBeenCalledWith('2026', '4');
+  });
+
   it('uses the authenticated administrator identity instead of the URL identifier', async () => {
     const adminService = { updateProfile: jest.fn().mockResolvedValue({ id: 'session-admin' }) };
     const authService = {};

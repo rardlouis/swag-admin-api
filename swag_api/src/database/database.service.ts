@@ -10,7 +10,11 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
   private voucherSchemaPromise: Promise<void> | null = null;
 
   private readonly driver = process.env.DB_DRIVER ?? 'ODBC Driver 17 for SQL Server';
-  private readonly server = process.env.DB_SERVER ?? 'localhost\\SQLEXPRESS';
+  // SQL Server Express on this host has local Shared Memory enabled while its
+  // network protocols and SQL Browser are intentionally disabled. `(local)`
+  // reaches the same instance without requiring a network listener. Explicit
+  // DB_SERVER / DB_CONNECTION_STRING deployment settings still take priority.
+  private readonly server = process.env.DB_SERVER ?? '(local)\\SQLEXPRESS';
   private readonly database = process.env.DB_NAME ?? 'SWAG_db';
   private readonly connectionString =
     process.env.DB_CONNECTION_STRING ??

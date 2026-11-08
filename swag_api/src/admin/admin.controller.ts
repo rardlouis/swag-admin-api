@@ -30,8 +30,8 @@ export class AdminController {
   }
 
   @Get('sales-report')
-  salesReport() {
-    return this.adminService.salesReport();
+  salesReport(@Query('year') year?: string, @Query('month') month?: string) {
+    return this.adminService.salesReport(year, month);
   }
 
   @Get('customers')
@@ -245,8 +245,8 @@ export class AdminController {
   }
 
   @Get('export/sales-report')
-  async exportSalesReport(@Res({ passthrough: true }) res: Response) {
-    const buffer = await this.adminService.exportSalesReport();
+  async exportSalesReport(@Query('year') year: string, @Query('month') month: string, @Res({ passthrough: true }) res: Response) {
+    const buffer = await this.adminService.exportSalesReport(year, month);
     res.set({
       'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'Content-Disposition': `attachment; filename="SWAG_Sales_Report_${new Date().toISOString().split('T')[0]}.xlsx"`

@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { json, urlencoded } from 'express';
 import { join } from 'path';
 import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { SafeExceptionFilter } from './common/safe-exception.filter';
@@ -40,7 +41,12 @@ async function bootstrap() {
   mkdirSync(join(process.cwd(), 'uploads', 'receipts'), { recursive: true });
   mkdirSync(join(process.cwd(), 'uploads', 'reviews'), { recursive: true });
   mkdirSync(join(process.cwd(), 'uploads', 'messages'), { recursive: true });
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // Skin-tone analysis sends a resized image as Base64 JSON. Nest's default
+  // 100 KB parser limit rejects ordinary phone photos before the controller.
+  // Keep this only slightly above the 8 MB application validation ceiling.
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bodyParser: false });
+  app.use(json({ limit: '9mb' }));
+  app.use(urlencoded({ extended: true, limit: '9mb' }));
   app.set('trust proxy', 1);
   app.enableCors({
     origin: [
