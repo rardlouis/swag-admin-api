@@ -604,6 +604,7 @@ export class ProductsService {
   }
 
   private async ensureProductStyleColumn() {
+    if (process.env.DB_SCHEMA_MANAGEMENT === 'false') return;
     if (!(await this.databaseService.columnExists('PRODUCTS', 'style_id'))) {
       await this.databaseService.query(`ALTER TABLE PRODUCTS ADD style_id SMALLINT NULL; ALTER TABLE PRODUCTS ADD CONSTRAINT FK_PRODUCTS_FASHION_STYLE FOREIGN KEY (style_id) REFERENCES FASHION_STYLES(style_id);`);
     }
@@ -911,6 +912,7 @@ export class ProductsService {
   }
 
   private async ensureColorLookups() {
+    if (process.env.DB_SCHEMA_MANAGEMENT === 'false') return;
     const [hasColorFamilies, hasPresetColors, hasColorTones] = await Promise.all([
       this.databaseService.tableExists('COLOR_FAMILIES'),
       this.databaseService.tableExists('PRESET_COLORS'),

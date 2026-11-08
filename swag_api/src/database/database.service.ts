@@ -10,6 +10,7 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
   private voucherSchemaPromise: Promise<void> | null = null;
 
   private readonly driver = process.env.DB_DRIVER ?? 'ODBC Driver 17 for SQL Server';
+  private readonly schemaManagementEnabled = process.env.DB_SCHEMA_MANAGEMENT !== 'false';
   // SQL Server Express on this host has local Shared Memory enabled while its
   // network protocols and SQL Browser are intentionally disabled. `(local)`
   // reaches the same instance without requiring a network listener. Explicit
@@ -26,6 +27,9 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
   } as unknown as sql.config;
 
   async onModuleInit() {
+    if (!this.schemaManagementEnabled) {
+      return;
+    }
     await this.ensureBaseLookups();
     await this.ensureUserProfileColumns();
     await this.ensureStyleAudienceSchema();
@@ -202,6 +206,7 @@ export class DatabaseService implements OnModuleDestroy, OnModuleInit {
    * personal gender. Junction tables intentionally support multi-select.
    */
   async ensureStyleAudienceSchema() {
+    if (!this.schemaManagementEnabled) return;
     if (!(await this.tableExists('USERS')) || !(await this.tableExists('PRODUCTS'))) return;
 
     await this.query(`
