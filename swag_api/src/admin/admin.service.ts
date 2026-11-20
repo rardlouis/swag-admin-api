@@ -96,14 +96,20 @@ export class AdminService {
       `),
       this.databaseService.query(`
         SELECT
-          LEFT(DATENAME(month, placed_at), 3) AS month,
-          MONTH(placed_at) AS monthNumber,
-          CAST(SUM(total_amount) AS float) AS avgSale,
-          CAST(AVG(total_amount) AS float) AS avgItem
-        FROM ORDERS
-        WHERE YEAR(placed_at) = YEAR(GETDATE())
-        GROUP BY MONTH(placed_at), DATENAME(month, placed_at)
-        ORDER BY MONTH(placed_at)
+          LEFT(DATENAME(month, o.placed_at), 3) AS month,
+          MONTH(o.placed_at) AS monthNumber,
+          CAST(SUM(o.total_amount) AS float) AS totalSales,
+          CAST(AVG(o.total_amount) AS float) AS avgSale,
+          CAST(AVG(CAST(ISNULL(orderItems.itemCount, 0) AS float)) AS float) AS avgItems
+        FROM ORDERS o
+        OUTER APPLY (
+          SELECT SUM(oi.quantity) AS itemCount
+          FROM ORDER_ITEMS oi
+          WHERE oi.order_id = o.order_id
+        ) orderItems
+        WHERE YEAR(o.placed_at) = YEAR(GETDATE())
+        GROUP BY MONTH(o.placed_at), DATENAME(month, o.placed_at)
+        ORDER BY MONTH(o.placed_at)
       `),
       this.databaseService.query(`
         SELECT TOP 5

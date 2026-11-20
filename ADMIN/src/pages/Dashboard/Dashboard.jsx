@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
+  CartesianGrid,
   LineChart,
   Line,
   XAxis,
@@ -21,6 +22,8 @@ export default function Dashboard() {
     customerLocations: [],
   });
   const [stylePeriod, setStylePeriod] = useState("month");
+  const [salesPeriod, setSalesPeriod] = useState("year");
+  const [dashboardState, setDashboardState] = useState("loading");
 
   useEffect(() => {
     apiGet("/admin/dashboard")
@@ -31,8 +34,9 @@ export default function Dashboard() {
           popularStyles: payload.popularStyles ?? [],
           customerLocations: Array.isArray(payload.customerLocations) ? payload.customerLocations : [],
         });
+        setDashboardState("ready");
       })
-      .catch(() => {});
+      .catch(() => setDashboardState("error"));
   }, []);
 
   useEffect(() => {
@@ -42,8 +46,40 @@ export default function Dashboard() {
   }, [stylePeriod]);
 
   const { summary, salesByMonth, popularStyles, customerLocations } = data;
+  const visibleSalesByMonth = useMemo(() => {
+    const currentMonthNumber = new Date().getMonth() + 1;
+    if (salesPeriod === "month") return salesByMonth.filter((row) => Number(row.monthNumber) === currentMonthNumber);
+    if (salesPeriod === "quarter") return salesByMonth.filter((row) => (
+      Number(row.monthNumber) >= Math.max(1, currentMonthNumber - 2)
+      && Number(row.monthNumber) <= currentMonthNumber
+    ));
+    return salesByMonth;
+  }, [salesByMonth, salesPeriod]);
+  const latestSalesMonth = salesByMonth.at(-1);
+  const previousSalesMonth = salesByMonth.at(-2);
   const locatedCustomerCount = customerLocations.reduce((total, item) => total + Number(item.customers ?? 0), 0);
   const mapFocus = customerLocations[0]?.location ? `${customerLocations[0].location}, Philippines` : 'Philippines';
+
+  const formatItems = (value) => `${Number(value ?? 0).toLocaleString("en-PH", {
+    maximumFractionDigits: 2,
+  })} items`;
+  const formatCompactPeso = (value) => `₱${Number(value ?? 0).toLocaleString("en-PH", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  })}`;
+  const monthComparison = (currentValue, previousValue) => {
+    if (previousValue == null) return { label: "No previous month available", direction: "neutral" };
+    const difference = Number(currentValue ?? 0) - Number(previousValue ?? 0);
+    if (difference === 0) return { label: "No change from previous month", direction: "neutral" };
+    if (Number(previousValue) === 0) return { label: `${difference > 0 ? "Increased" : "Decreased"} from previous month`, direction: difference > 0 ? "up" : "down" };
+    const percent = Math.abs((difference / Number(previousValue)) * 100).toFixed(1);
+    return {
+      label: `${difference > 0 ? "Increased" : "Decreased"} ${percent}% from previous month`,
+      direction: difference > 0 ? "up" : "down",
+    };
+  };
+  const latestSaleComparison = latestSalesMonth ? monthComparison(latestSalesMonth.avgSale, previousSalesMonth?.avgSale) : null;
+  const latestItemsComparison = latestSalesMonth ? monthComparison(latestSalesMonth.avgItems, previousSalesMonth?.avgItems) : null;
 
   return (
     <div className="dashboard">
@@ -91,26 +127,68 @@ export default function Dashboard() {
           </div>
         </button>
 
-        {/* Row 2-3 Col 1-2: Sales Chart (spans 2 rows) */}
-        <div className="card chart-card">
+        {/* Row 2-3 Col 1-2: Monthly sales performance (spans 2 rows) */}
+        <section className="card chart-card" aria-labelledby="monthly-sales-performance-title">
           <div className="chart-card-header">
-            <p className="card-label">Your Sales this year</p>
+            <div>
+              <p id="monthly-sales-performance-title" className="card-label">Monthly Sales Performance</p>
+              <p className="chart-description">Average values from recorded orders</p>
+            </div>
+            <div className="chart-actions">
+              <select aria-label="Sales chart period" value={salesPeriod} onChange={(event) => setSalesPeriod(event.target.value)}>
+                <option value="month">This Month</option>
+                <option value="quarter">Last 3 Months</option>
+                <option value="year">This Year</option>
+              </select>
             <button type="button" className="show-all-btn" onClick={() => navigate('/salesreport')}>Show All <MdArrowOutward size={13} /></button>
+            </div>
           </div>
-          <div className="chart-legend">
-            <span className="legend-dot legend-dot--green" /> Average Sale Value
-            <span className="legend-dot legend-dot--blue" style={{ marginLeft: 12 }} /> Average Item per Sale
-          </div>
-          <ResponsiveContainer width="100%" height={220}>
-            <LineChart data={salesByMonth} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-              <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#999" }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#bbb" }} axisLine={false} tickLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`} />
-              <Tooltip formatter={(v) => `₱${v.toLocaleString()}`} />
-              <Line type="monotone" dataKey="avgSale" stroke="#a3c940" strokeWidth={2.5} dot={false} />
-              <Line type="monotone" dataKey="avgItem" stroke="#4a90d9" strokeWidth={2.5} dot={false} strokeDasharray="5 3" />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+          {dashboardState === "loading" ? <p className="chart-status">Loading monthly sales performance…</p> : null}
+          {dashboardState === "error" ? <p className="chart-status chart-status--error">Monthly sales performance could not be loaded. Please refresh and try again.</p> : null}
+          {dashboardState === "ready" && !salesByMonth.length ? <p className="chart-status">No recorded sales are available for this year yet.</p> : null}
+          {dashboardState === "ready" && salesByMonth.length ? <>
+            <div className="sales-summary-cards">
+              <article className="sales-summary-card">
+                <p>Latest month: {latestSalesMonth.month}</p>
+                <h2>{formatPeso(latestSalesMonth.avgSale)}</h2>
+                <span>Average Sale Value</span>
+                <small className={`metric-change metric-change--${latestSaleComparison.direction}`}>{latestSaleComparison.label}</small>
+              </article>
+              <article className="sales-summary-card">
+                <p>Latest month: {latestSalesMonth.month}</p>
+                <h2>{formatItems(latestSalesMonth.avgItems)}</h2>
+                <span>Average Items per Sale</span>
+                <small className={`metric-change metric-change--${latestItemsComparison.direction}`}>{latestItemsComparison.label}</small>
+              </article>
+            </div>
+            {visibleSalesByMonth.length ? <div className="sales-charts">
+              <article className="metric-chart" aria-label="Average Sale Value chart">
+                <h2>Average Sale Value <span>(₱)</span></h2>
+                <ResponsiveContainer width="100%" height={170}>
+                  <LineChart data={visibleSalesByMonth} margin={{ top: 10, right: 12, left: 2, bottom: 0 }}>
+                    <CartesianGrid stroke="#edf1f6" vertical={false} />
+                    <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                    <YAxis width={58} tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} tickFormatter={formatCompactPeso} />
+                    <Tooltip labelFormatter={(label) => `Month: ${label}`} formatter={(value) => [formatPeso(value), "Average Sale Value"]} />
+                    <Line type="monotone" dataKey="avgSale" stroke="#0E4C8F" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </article>
+              <article className="metric-chart" aria-label="Average Items per Sale chart">
+                <h2>Average Items per Sale <span>(items)</span></h2>
+                <ResponsiveContainer width="100%" height={170}>
+                  <LineChart data={visibleSalesByMonth} margin={{ top: 10, right: 12, left: 2, bottom: 0 }}>
+                    <CartesianGrid stroke="#edf1f6" vertical={false} />
+                    <XAxis dataKey="month" tick={{ fontSize: 11, fill: "#64748b" }} axisLine={false} tickLine={false} />
+                    <YAxis width={58} tick={{ fontSize: 10, fill: "#64748b" }} axisLine={false} tickLine={false} tickFormatter={formatItems} />
+                    <Tooltip labelFormatter={(label) => `Month: ${label}`} formatter={(value) => [formatItems(value), "Average Items per Sale"]} />
+                    <Line type="monotone" dataKey="avgItems" stroke="#4a90d9" strokeWidth={2.5} dot={{ r: 3 }} activeDot={{ r: 5 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </article>
+            </div> : <p className="chart-status">No recorded sales are available for the selected period.</p>}
+          </> : null}
+        </section>
 
         {/* Row 2 Col 3: Total Transactions */}
         <button type="button" className="card stat-card total-trans-card dashboard-card-link" aria-label="View orders" onClick={() => navigate('/orders/all-orders')}>
